@@ -1817,6 +1817,7 @@ func TestAccDeviceResource_portOverrides_preservesUnmanagedPorts(t *testing.T) {
 	}
 	managedIdx := *sw.PortOverrides[0].PortIDX
 	untouchedIdx := *sw.PortOverrides[1].PortIDX
+	require.NotEqual(t, managedIdx, untouchedIdx, "fixture device must have two distinct port_idx entries")
 	client := testAccGetClient(t)
 	ctx := t.Context()
 
