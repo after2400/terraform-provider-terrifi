@@ -91,6 +91,7 @@ func TestNetworkModelToAPI(t *testing.T) {
 			DHCPStop:    types.StringNull(),
 			DHCPLease:   types.Int64Null(),
 			DHCPDns:     types.ListNull(types.StringType),
+			DomainName:  types.StringNull(),
 		}
 
 		net := r.modelToAPI(ctx, model)
@@ -105,8 +106,23 @@ func TestNetworkModelToAPI(t *testing.T) {
 		assert.Nil(t, net.DHCPDStart)
 		assert.Nil(t, net.DHCPDStop)
 		assert.Nil(t, net.DHCPDLeaseTime)
+		assert.Nil(t, net.DomainName)
 		// Setting-preference workaround must NOT be applied for vlan-only.
 		assert.Nil(t, net.SettingPreference)
+	})
+
+	t.Run("domain_name set for corporate network", func(t *testing.T) {
+		model := &networkResourceModel{
+			Name:        types.StringValue("Corporate"),
+			Purpose:     types.StringValue("corporate"),
+			DHCPEnabled: types.BoolValue(false),
+			DomainName:  types.StringValue("home.example.com"),
+		}
+
+		net := r.modelToAPI(ctx, model)
+
+		require.NotNil(t, net.DomainName)
+		assert.Equal(t, "home.example.com", *net.DomainName)
 	})
 
 	t.Run("dhcp dns list fans out to API fields", func(t *testing.T) {
@@ -220,6 +236,25 @@ func TestNetworkAPIToModel(t *testing.T) {
 		assert.True(t, model.DHCPStop.IsNull())
 		assert.True(t, model.DHCPLease.IsNull())
 		assert.True(t, model.DHCPDns.IsNull())
+		assert.True(t, model.DomainName.IsNull())
+	})
+
+	t.Run("network with domain_name", func(t *testing.T) {
+		name := "Test Network"
+		domainName := "home.example.com"
+		net := &unifi.Network{
+			ID:                    "jkl012",
+			Purpose:               "corporate",
+			Name:                  &name,
+			DHCPDEnabled:          true,
+			InternetAccessEnabled: true,
+			DomainName:            &domainName,
+		}
+
+		var model networkResourceModel
+		r.apiToModel(ctx, net, &model, "default")
+
+		assert.Equal(t, "home.example.com", model.DomainName.ValueString())
 	})
 
 	t.Run("network with DNS servers", func(t *testing.T) {
@@ -271,6 +306,40 @@ func TestNetworkApplyPlanToState(t *testing.T) {
 		assert.Equal(t, int64(33), state.VLANId.ValueInt64())
 		assert.Equal(t, "192.168.33.0/24", state.Subnet.ValueString())
 		assert.Equal(t, "LAN", state.NetworkGroup.ValueString())
+	})
+
+	t.Run("unset domain_name in plan preserves state value", func(t *testing.T) {
+		state := &networkResourceModel{
+			Name:       types.StringValue("Test Network"),
+			Purpose:    types.StringValue("corporate"),
+			DomainName: types.StringValue("home.example.com"),
+		}
+
+		plan := &networkResourceModel{
+			Name:       types.StringValue("Test Network"),
+			DomainName: types.StringNull(),
+		}
+
+		r.applyPlanToState(plan, state)
+
+		assert.Equal(t, "home.example.com", state.DomainName.ValueString())
+	})
+
+	t.Run("domain_name in plan updates state", func(t *testing.T) {
+		state := &networkResourceModel{
+			Name:       types.StringValue("Test Network"),
+			Purpose:    types.StringValue("corporate"),
+			DomainName: types.StringValue("old.example.com"),
+		}
+
+		plan := &networkResourceModel{
+			Name:       types.StringValue("Test Network"),
+			DomainName: types.StringValue("new.example.com"),
+		}
+
+		r.applyPlanToState(plan, state)
+
+		assert.Equal(t, "new.example.com", state.DomainName.ValueString())
 	})
 }
 
@@ -434,6 +503,55 @@ resource "terrifi_network" "test" {
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr("terrifi_network.test", "dhcp_enabled", "false"),
 				),
+			},
+		},
+	})
+}
+
+func TestAccNetwork_updateDomainName(t *testing.T) {
+	name := fmt.Sprintf("tfacc-domain-%s", randomSuffix())
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { preCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: fmt.Sprintf(`
+resource "terrifi_network" "test" {
+  name                     = %q
+  purpose                  = "corporate"
+  vlan_id                  = 41
+  subnet                   = "192.168.41.1/24"
+  dhcp_enabled             = true
+  dhcp_start               = "192.168.41.6"
+  dhcp_stop                = "192.168.41.254"
+  domain_name              = "home.example.com"
+}
+`, name),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("terrifi_network.test", "domain_name", "home.example.com"),
+				),
+			},
+			{
+				Config: fmt.Sprintf(`
+resource "terrifi_network" "test" {
+  name                     = %q
+  purpose                  = "corporate"
+  vlan_id                  = 41
+  subnet                   = "192.168.41.1/24"
+  dhcp_enabled             = true
+  dhcp_start               = "192.168.41.6"
+  dhcp_stop                = "192.168.41.254"
+  domain_name              = "updated.example.com"
+}
+`, name),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("terrifi_network.test", "domain_name", "updated.example.com"),
+				),
+			},
+			{
+				ResourceName:      "terrifi_network.test",
+				ImportState:       true,
+				ImportStateVerify: true,
 			},
 		},
 	})
