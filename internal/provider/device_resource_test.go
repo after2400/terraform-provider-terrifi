@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/stretchr/testify/assert"
@@ -1664,5 +1665,43 @@ resource "terrifi_device" "test" {
 				ExpectError: regexp.MustCompile(`value must be between`),
 			},
 		},
+	})
+}
+
+func TestPreserveNullPortOverrides(t *testing.T) {
+	t.Run("nulls fields not set in plan, keeps configured ones", func(t *testing.T) {
+		planned := []devicePortOverrideModel{
+			{
+				PortIDX:            types.Int64Value(15),
+				Forward:            types.StringValue("customize"),
+				NativeNetworkID:    types.StringNull(),
+				PoeMode:            types.StringValue("auto"),
+				ExcludedNetworkIDs: types.ListNull(types.StringType),
+			},
+		}
+		result := []devicePortOverrideModel{
+			{
+				PortIDX:            types.Int64Value(15),
+				Forward:            types.StringValue("customize"),
+				NativeNetworkID:    types.StringValue("net-infra"), // API-filled, not planned
+				PoeMode:            types.StringValue("auto"),
+				ExcludedNetworkIDs: types.ListValueMust(types.StringType, []attr.Value{types.StringValue("net-default")}),
+			},
+		}
+
+		preserveNullPortOverrides(planned, result)
+
+		assert.Equal(t, "customize", result[0].Forward.ValueString())
+		assert.True(t, result[0].NativeNetworkID.IsNull(), "unplanned field should be nulled")
+		assert.Equal(t, "auto", result[0].PoeMode.ValueString())
+		assert.True(t, result[0].ExcludedNetworkIDs.IsNull(), "unplanned list field should be nulled")
+	})
+
+	t.Run("port not present in planned is left untouched", func(t *testing.T) {
+		result := []devicePortOverrideModel{
+			{PortIDX: types.Int64Value(20), Forward: types.StringValue("all")},
+		}
+		preserveNullPortOverrides(nil, result)
+		assert.Equal(t, "all", result[0].Forward.ValueString())
 	})
 }

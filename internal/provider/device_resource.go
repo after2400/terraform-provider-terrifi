@@ -669,6 +669,7 @@ func (r *deviceResource) preserveNullOptionals(plan, state *deviceResourceModel)
 	preserveNullRadio(plan.Radio24, &state.Radio24)
 	preserveNullRadio(plan.Radio5, &state.Radio5)
 	preserveNullRadio(plan.Radio6, &state.Radio6)
+	preserveNullPortOverrides(plan.PortOverrides, state.PortOverrides)
 }
 
 // preserveNullRadio handles null preservation for one radio block. If the
@@ -700,6 +701,41 @@ func preserveNullRadio(plan *deviceRadioSettingsModel, state **deviceRadioSettin
 	}
 	if plan.MinRssi.IsNull() {
 		s.MinRssi = types.Int64Null()
+	}
+}
+
+// preserveNullPortOverrides nulls out fields on each result entry that the
+// user didn't configure in planned, matched by port_idx (not list position,
+// since portOverridesFromAPI can drop a tracked port that no longer exists
+// on the live device).
+func preserveNullPortOverrides(planned, result []devicePortOverrideModel) {
+	plannedByIdx := make(map[int64]devicePortOverrideModel, len(planned))
+	for _, p := range planned {
+		plannedByIdx[p.PortIDX.ValueInt64()] = p
+	}
+	for i := range result {
+		p, ok := plannedByIdx[result[i].PortIDX.ValueInt64()]
+		if !ok {
+			continue
+		}
+		if p.Forward.IsNull() {
+			result[i].Forward = types.StringNull()
+		}
+		if p.OpMode.IsNull() {
+			result[i].OpMode = types.StringNull()
+		}
+		if p.NativeNetworkID.IsNull() {
+			result[i].NativeNetworkID = types.StringNull()
+		}
+		if p.TaggedVLANMgmt.IsNull() {
+			result[i].TaggedVLANMgmt = types.StringNull()
+		}
+		if p.PoeMode.IsNull() {
+			result[i].PoeMode = types.StringNull()
+		}
+		if p.ExcludedNetworkIDs.IsNull() {
+			result[i].ExcludedNetworkIDs = types.ListNull(types.StringType)
+		}
 	}
 }
 
