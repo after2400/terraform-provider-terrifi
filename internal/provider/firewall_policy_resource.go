@@ -146,7 +146,24 @@ func (r *firewallPolicyResource) Schema(
 			MarkdownDescription: "Port matching type. Valid values: `ANY`, `SPECIFIC`, `OBJECT`. Default: `ANY`. Automatically derived when `port` or `port_group_id` is set.",
 			Optional:            true,
 			Computed:            true,
-			Default:             stringdefault.StaticString("ANY"),
+			// A static Default (stringdefault.StaticString) would seem like
+			// the obvious way to express "defaults to ANY", but it cannot
+			// coexist with UseStateForUnknown here: the framework applies
+			// Default (TransformDefaults) before it marks computed-null
+			// config values unknown, so a static default always wins and
+			// permanently overrides the real derived value (SPECIFIC/OBJECT
+			// from resolvePortMatchingType in firewall_policy_api.go) on
+			// every subsequent plan — every existing policy with a port or
+			// port_group_id set, and no explicit port_matching_type, would
+			// plan back to ANY, then fail apply with "Provider produced
+			// inconsistent result after apply" once the real derived value
+			// came back. portMatchingTypePlanModifier derives the same
+			// value resolvePortMatchingType would, directly from the
+			// sibling port/port_group_id in the plan, so it's correct on
+			// both create and update without relying on prior state.
+			PlanModifiers: []planmodifier.String{
+				portMatchingTypePlanModifier{},
+			},
 			Validators: []validator.String{
 				stringvalidator.OneOf("ANY", "SPECIFIC", "OBJECT"),
 			},
@@ -468,6 +485,63 @@ func (r *firewallPolicyResource) ImportState(
 	}
 
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+}
+
+// portMatchingTypePlanModifier derives a source/destination endpoint's
+// port_matching_type from its sibling port/port_group_id values, mirroring
+// resolvePortMatchingType in firewall_policy_api.go. See the schema
+// attribute's comment for why this can't be a static Default.
+type portMatchingTypePlanModifier struct{}
+
+func (m portMatchingTypePlanModifier) Description(ctx context.Context) string {
+	return m.MarkdownDescription(ctx)
+}
+
+func (m portMatchingTypePlanModifier) MarkdownDescription(_ context.Context) string {
+	return "Derives `port_matching_type` from the sibling `port`/`port_group_id` when not explicitly configured."
+}
+
+func (m portMatchingTypePlanModifier) PlanModifyString(
+	ctx context.Context,
+	req planmodifier.StringRequest,
+	resp *planmodifier.StringResponse,
+) {
+	// An explicit user-supplied value always wins.
+	if !req.ConfigValue.IsNull() {
+		return
+	}
+
+	parent := req.Path.ParentPath()
+
+	var portGroupID types.String
+	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, parent.AtName("port_group_id"), &portGroupID)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if portGroupID.IsUnknown() {
+		resp.PlanValue = types.StringUnknown()
+		return
+	}
+	if !portGroupID.IsNull() && portGroupID.ValueString() != "" {
+		resp.PlanValue = types.StringValue("OBJECT")
+		return
+	}
+
+	var port types.Int64
+	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, parent.AtName("port"), &port)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if port.IsUnknown() {
+		resp.PlanValue = types.StringUnknown()
+		return
+	}
+	if !port.IsNull() {
+		resp.PlanValue = types.StringValue("SPECIFIC")
+		return
+	}
+
+	resp.PlanValue = types.StringValue("ANY")
 }
 
 func (r *firewallPolicyResource) ModifyPlan(
