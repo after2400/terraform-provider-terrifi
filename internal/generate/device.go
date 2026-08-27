@@ -63,6 +63,9 @@ func DeviceBlocks(devices []unifi.Device) []ResourceBlock {
 		if v := formatDeviceConfigNetwork(d.ConfigNetwork); v != "" {
 			block.Attributes = append(block.Attributes, Attr{Key: "config_network", Value: v})
 		}
+		if v := formatDevicePortOverrides(d.PortOverrides); v != "" {
+			block.Attributes = append(block.Attributes, Attr{Key: "port_overrides", Value: v})
+		}
 
 		blocks = append(blocks, block)
 	}
@@ -97,4 +100,45 @@ func formatDeviceConfigNetwork(cn *unifi.DeviceConfigNetwork) string {
 		}
 	}
 	return "{\n" + strings.Join(lines, "\n") + "\n  }"
+}
+
+// formatDevicePortOverrides renders a device's PortOverrides as a
+// list-of-objects HCL literal (for use as an Attribute value), covering the
+// same field set terrifi_device's schema models (VLAN/trunk + PoE +
+// forward/op_mode — see the port_overrides design spec). Returns an empty
+// string when there are no overrides, so the attribute is omitted. Field
+// names match the provider schema exactly so this output is
+// forward-compatible with terrifi_device's port_overrides attribute.
+func formatDevicePortOverrides(overrides []unifi.DevicePortOverrides) string {
+	var entries []string
+	for _, po := range overrides {
+		if po.PortIDX == nil {
+			continue
+		}
+		var lines []string
+		lines = append(lines, fmt.Sprintf("      port_idx = %d", *po.PortIDX))
+		if po.Forward != "" {
+			lines = append(lines, fmt.Sprintf("      forward  = %s", HCLString(po.Forward)))
+		}
+		if po.OpMode != "" {
+			lines = append(lines, fmt.Sprintf("      op_mode  = %s", HCLString(po.OpMode)))
+		}
+		if po.NATiveNetworkID != "" {
+			lines = append(lines, fmt.Sprintf("      native_network_id = %s", HCLString(po.NATiveNetworkID)))
+		}
+		if po.TaggedVLANMgmt != "" {
+			lines = append(lines, fmt.Sprintf("      tagged_vlan_mgmt = %s", HCLString(po.TaggedVLANMgmt)))
+		}
+		if len(po.ExcludedNetworkIDs) > 0 {
+			lines = append(lines, fmt.Sprintf("      excluded_network_ids = %s", HCLStringList(po.ExcludedNetworkIDs)))
+		}
+		if po.PoeMode != "" {
+			lines = append(lines, fmt.Sprintf("      poe_mode = %s", HCLString(po.PoeMode)))
+		}
+		entries = append(entries, "    {\n"+strings.Join(lines, "\n")+"\n    }")
+	}
+	if len(entries) == 0 {
+		return ""
+	}
+	return "[\n" + strings.Join(entries, ",\n") + "\n  ]"
 }
