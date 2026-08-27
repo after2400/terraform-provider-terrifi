@@ -1,9 +1,12 @@
 package provider
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
+	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/ubiquiti-community/go-unifi/unifi"
@@ -124,4 +127,116 @@ func TestFixRadioTableBytes_decodesIntoUnifiDevice(t *testing.T) {
 	assert.Equal(t, "149", d.RadioTable[1].Channel)
 	assert.Equal(t, "23", d.RadioTable[1].TxPower)
 	assert.Equal(t, "high", d.RadioTable[1].TxPowerMode)
+}
+
+func TestApplyPlannedToPortOverrideEntry(t *testing.T) {
+	t.Run("updates only non-null modeled fields, preserves everything else", func(t *testing.T) {
+		idx := int64(15)
+		speed := int64(2500)
+		existing := &unifi.DevicePortOverrides{
+			PortIDX:         &idx,
+			Forward:         "all",
+			NATiveNetworkID: "net-default",
+			PoeMode:         "auto",
+			Speed:           &speed,
+			FullDuplex:      true,
+			Isolation:       true,
+			Name:            "Uplink",
+		}
+		planned := devicePortOverrideModel{
+			PortIDX:            types.Int64Value(15),
+			Forward:            types.StringValue("customize"),
+			NativeNetworkID:    types.StringValue("net-infra"),
+			TaggedVLANMgmt:     types.StringNull(),
+			PoeMode:            types.StringNull(),
+			OpMode:             types.StringNull(),
+			ExcludedNetworkIDs: types.ListNull(types.StringType),
+		}
+
+		applyPlannedToPortOverrideEntry(context.Background(), existing, planned)
+
+		// Modeled + set fields updated.
+		assert.Equal(t, "customize", existing.Forward)
+		assert.Equal(t, "net-infra", existing.NATiveNetworkID)
+		// Modeled but null-in-plan field left untouched.
+		assert.Equal(t, "auto", existing.PoeMode)
+		// Unmodeled fields (speed/duplex/isolation/name) survive unchanged —
+		// this is the core safety property the merge logic must guarantee.
+		require.NotNil(t, existing.Speed)
+		assert.Equal(t, int64(2500), *existing.Speed)
+		assert.True(t, existing.FullDuplex)
+		assert.True(t, existing.Isolation)
+		assert.Equal(t, "Uplink", existing.Name)
+	})
+
+	t.Run("sets excluded_network_ids when configured", func(t *testing.T) {
+		idx := int64(18)
+		existing := &unifi.DevicePortOverrides{PortIDX: &idx}
+		planned := devicePortOverrideModel{
+			PortIDX: types.Int64Value(18),
+			ExcludedNetworkIDs: types.ListValueMust(types.StringType, []attr.Value{
+				types.StringValue("net-default"),
+				types.StringValue("net-work"),
+			}),
+		}
+		applyPlannedToPortOverrideEntry(context.Background(), existing, planned)
+		assert.Equal(t, []string{"net-default", "net-work"}, existing.ExcludedNetworkIDs)
+	})
+
+	t.Run("leaves excluded_network_ids untouched when null in plan", func(t *testing.T) {
+		idx := int64(18)
+		existing := &unifi.DevicePortOverrides{
+			PortIDX:            &idx,
+			ExcludedNetworkIDs: []string{"net-default"},
+		}
+		planned := devicePortOverrideModel{
+			PortIDX:            types.Int64Value(18),
+			ExcludedNetworkIDs: types.ListNull(types.StringType),
+		}
+		applyPlannedToPortOverrideEntry(context.Background(), existing, planned)
+		assert.Equal(t, []string{"net-default"}, existing.ExcludedNetworkIDs)
+	})
+}
+
+func TestUpdateDevicePayload_portOverrides_touchesOnlyDeclaredPorts(t *testing.T) {
+	// Verifies the port-level half of the merge directly against the
+	// plannedByPort map-building logic used in UpdateDevice: a plan
+	// declaring port 15 must never produce a payload entry that mutates
+	// port 17's data. This exercises the same map-keying logic UpdateDevice
+	// uses, without requiring an HTTP round trip.
+	idx15 := int64(15)
+	idx17 := int64(17)
+	m := &deviceResourceModel{
+		PortOverrides: []devicePortOverrideModel{
+			{PortIDX: types.Int64Value(15), Forward: types.StringValue("customize")},
+		},
+	}
+	existingPorts := []unifi.DevicePortOverrides{
+		{PortIDX: &idx15, Forward: "all", Name: "Port 15"},
+		{PortIDX: &idx17, Forward: "all", Name: "Port 17"},
+	}
+
+	plannedByPort := map[int64]*devicePortOverrideModel{}
+	for i := range m.PortOverrides {
+		if m.PortOverrides[i].PortIDX.IsNull() || m.PortOverrides[i].PortIDX.IsUnknown() {
+			continue
+		}
+		plannedByPort[m.PortOverrides[i].PortIDX.ValueInt64()] = &m.PortOverrides[i]
+	}
+
+	merged := make([]unifi.DevicePortOverrides, len(existingPorts))
+	copy(merged, existingPorts)
+	for i := range merged {
+		if merged[i].PortIDX == nil {
+			continue
+		}
+		if planned, ok := plannedByPort[*merged[i].PortIDX]; ok {
+			applyPlannedToPortOverrideEntry(context.Background(), &merged[i], *planned)
+		}
+	}
+
+	require.Len(t, merged, 2)
+	assert.Equal(t, "customize", merged[0].Forward, "declared port 15 should be updated")
+	assert.Equal(t, "all", merged[1].Forward, "undeclared port 17 must be untouched")
+	assert.Equal(t, "Port 17", merged[1].Name)
 }

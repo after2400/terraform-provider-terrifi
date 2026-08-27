@@ -56,6 +56,7 @@ type deviceUpdatePayload struct {
 	Volume                     *int64                      `json:"volume,omitempty"`
 	ConfigNetwork              *deviceConfigNetworkPayload `json:"config_network,omitempty"`
 	RadioTable                 []unifi.DeviceRadioTable    `json:"radio_table,omitempty"`
+	PortOverrides              []unifi.DevicePortOverrides `json:"port_overrides,omitempty"`
 }
 
 type deviceConfigNetworkPayload struct {
@@ -89,6 +90,34 @@ func applyPlannedToRadioEntry(rt *unifi.DeviceRadioTable, planned deviceRadioSet
 	if !planned.MinRssi.IsNull() && !planned.MinRssi.IsUnknown() {
 		v := planned.MinRssi.ValueInt64()
 		rt.MinRssi = &v
+	}
+}
+
+// applyPlannedToPortOverrideEntry updates only the user-configured fields in
+// an existing DevicePortOverrides entry, preserving every other field
+// (speed/duplex, 802.1X, storm control, LACP, etc.) that this provider
+// doesn't model. This is the field-level half of the two-level merge — see
+// UpdateDevice for the port-level half.
+func applyPlannedToPortOverrideEntry(ctx context.Context, po *unifi.DevicePortOverrides, planned devicePortOverrideModel) {
+	if !planned.Forward.IsNull() && !planned.Forward.IsUnknown() {
+		po.Forward = planned.Forward.ValueString()
+	}
+	if !planned.OpMode.IsNull() && !planned.OpMode.IsUnknown() {
+		po.OpMode = planned.OpMode.ValueString()
+	}
+	if !planned.NativeNetworkID.IsNull() && !planned.NativeNetworkID.IsUnknown() {
+		po.NATiveNetworkID = planned.NativeNetworkID.ValueString()
+	}
+	if !planned.TaggedVLANMgmt.IsNull() && !planned.TaggedVLANMgmt.IsUnknown() {
+		po.TaggedVLANMgmt = planned.TaggedVLANMgmt.ValueString()
+	}
+	if !planned.PoeMode.IsNull() && !planned.PoeMode.IsUnknown() {
+		po.PoeMode = planned.PoeMode.ValueString()
+	}
+	if !planned.ExcludedNetworkIDs.IsNull() && !planned.ExcludedNetworkIDs.IsUnknown() {
+		var ids []string
+		planned.ExcludedNetworkIDs.ElementsAs(ctx, &ids, false)
+		po.ExcludedNetworkIDs = ids
 	}
 }
 
@@ -165,22 +194,48 @@ func (c *Client) UpdateDevice(ctx context.Context, site string, id string, m *de
 		plannedByRadio["6e"] = m.Radio6
 	}
 
-	if len(plannedByRadio) > 0 {
-		// Read-modify-write: fetch current device to preserve non-managed radio
-		// fields and entries for radios not mentioned in the plan.
+	plannedByPort := map[int64]*devicePortOverrideModel{}
+	for i := range m.PortOverrides {
+		if m.PortOverrides[i].PortIDX.IsNull() || m.PortOverrides[i].PortIDX.IsUnknown() {
+			continue
+		}
+		plannedByPort[m.PortOverrides[i].PortIDX.ValueInt64()] = &m.PortOverrides[i]
+	}
+
+	if len(plannedByRadio) > 0 || len(plannedByPort) > 0 {
+		// Read-modify-write: fetch current device to preserve non-managed
+		// radio and port_overrides fields, and entries not mentioned in the
+		// plan (port-level half of the merge — see
+		// applyPlannedToPortOverrideEntry for the field-level half).
 		existing, err := c.GetDevice(ctx, site, id)
 		if err != nil {
-			return fmt.Errorf("reading device for radio settings merge: %w", err)
+			return fmt.Errorf("reading device for radio/port_overrides merge: %w", err)
 		}
 
-		radioTable := make([]unifi.DeviceRadioTable, len(existing.RadioTable))
-		copy(radioTable, existing.RadioTable)
-		for i := range radioTable {
-			if planned, ok := plannedByRadio[radioTable[i].Radio]; ok {
-				applyPlannedToRadioEntry(&radioTable[i], *planned)
+		if len(plannedByRadio) > 0 {
+			radioTable := make([]unifi.DeviceRadioTable, len(existing.RadioTable))
+			copy(radioTable, existing.RadioTable)
+			for i := range radioTable {
+				if planned, ok := plannedByRadio[radioTable[i].Radio]; ok {
+					applyPlannedToRadioEntry(&radioTable[i], *planned)
+				}
 			}
+			payload.RadioTable = radioTable
 		}
-		payload.RadioTable = radioTable
+
+		if len(plannedByPort) > 0 {
+			portOverrides := make([]unifi.DevicePortOverrides, len(existing.PortOverrides))
+			copy(portOverrides, existing.PortOverrides)
+			for i := range portOverrides {
+				if portOverrides[i].PortIDX == nil {
+					continue
+				}
+				if planned, ok := plannedByPort[*portOverrides[i].PortIDX]; ok {
+					applyPlannedToPortOverrideEntry(ctx, &portOverrides[i], *planned)
+				}
+			}
+			payload.PortOverrides = portOverrides
+		}
 	}
 
 	// Use the v1 REST API endpoint for device updates.
