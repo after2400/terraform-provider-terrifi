@@ -1705,3 +1705,31 @@ func TestPreserveNullPortOverrides(t *testing.T) {
 		assert.Equal(t, "all", result[0].Forward.ValueString())
 	})
 }
+
+func TestAccDeviceResource_validationDuplicatePortIdx(t *testing.T) {
+	if os.Getenv("TF_ACC") == "" {
+		t.Skip("TF_ACC not set")
+	}
+	preCheck(t)
+	requireAdoptedDevice(t)
+	dev := findFirstAdoptedDevice(t)
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: fmt.Sprintf(`
+resource "terrifi_device" "test" {
+  mac = %q
+
+  port_overrides = [
+    { port_idx = 5, poe_mode = "auto" },
+    { port_idx = 5, poe_mode = "off" },
+  ]
+}
+`, dev.MAC),
+				ExpectError: regexp.MustCompile(`(?i)duplicate.*port_idx`),
+			},
+		},
+	})
+}

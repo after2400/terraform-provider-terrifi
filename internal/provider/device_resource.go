@@ -412,6 +412,7 @@ func (r *deviceResource) Schema(
 func (r *deviceResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
 	return []resource.ConfigValidator{
 		deviceConfigNetworkValidator{},
+		devicePortOverridesValidator{},
 	}
 }
 
@@ -937,5 +938,42 @@ func (v deviceConfigNetworkValidator) ValidateResource(ctx context.Context, req 
 				)
 			}
 		}
+	}
+}
+
+// devicePortOverridesValidator ensures port_overrides entries have unique
+// port_idx values. Range validation (1-56) is handled by the port_idx
+// attribute's own int64validator.Between.
+type devicePortOverridesValidator struct{}
+
+func (v devicePortOverridesValidator) Description(_ context.Context) string {
+	return "port_overrides entries must have unique port_idx values."
+}
+
+func (v devicePortOverridesValidator) MarkdownDescription(ctx context.Context) string {
+	return v.Description(ctx)
+}
+
+func (v devicePortOverridesValidator) ValidateResource(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var overrides []devicePortOverrideModel
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("port_overrides"), &overrides)...)
+	if resp.Diagnostics.HasError() || overrides == nil {
+		return
+	}
+
+	seen := map[int64]bool{}
+	for i, po := range overrides {
+		if po.PortIDX.IsNull() || po.PortIDX.IsUnknown() {
+			continue
+		}
+		idx := po.PortIDX.ValueInt64()
+		if seen[idx] {
+			resp.Diagnostics.AddAttributeError(
+				path.Root("port_overrides").AtListIndex(i).AtName("port_idx"),
+				"Duplicate port_idx",
+				fmt.Sprintf("port_overrides contains more than one entry with port_idx = %d.", idx),
+			)
+		}
+		seen[idx] = true
 	}
 }
