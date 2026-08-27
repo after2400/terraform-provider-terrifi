@@ -226,12 +226,23 @@ func (c *Client) UpdateDevice(ctx context.Context, site string, id string, m *de
 		if len(plannedByPort) > 0 {
 			portOverrides := make([]unifi.DevicePortOverrides, len(existing.PortOverrides))
 			copy(portOverrides, existing.PortOverrides)
+			matched := make(map[int64]bool, len(plannedByPort))
 			for i := range portOverrides {
 				if portOverrides[i].PortIDX == nil {
 					continue
 				}
 				if planned, ok := plannedByPort[*portOverrides[i].PortIDX]; ok {
 					applyPlannedToPortOverrideEntry(ctx, &portOverrides[i], *planned)
+					matched[*portOverrides[i].PortIDX] = true
+				}
+			}
+			// A declared port_idx with no matching live entry silently would
+			// not apply — the schema only bounds port_idx to the protocol
+			// max (1-56), not this device's actual port count. Fail loudly
+			// rather than report a successful apply that changed nothing.
+			for idx := range plannedByPort {
+				if !matched[idx] {
+					return fmt.Errorf("port_overrides declares port_idx %d, but the device has no port_overrides entry for that port (the device may have fewer physical ports than declared)", idx)
 				}
 			}
 			payload.PortOverrides = portOverrides

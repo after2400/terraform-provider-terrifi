@@ -240,3 +240,58 @@ func TestUpdateDevicePayload_portOverrides_touchesOnlyDeclaredPorts(t *testing.T
 	assert.Equal(t, "all", merged[1].Forward, "undeclared port 17 must be untouched")
 	assert.Equal(t, "Port 17", merged[1].Name)
 }
+
+func TestUpdateDevicePayload_portOverrides_errorsOnUnmatchedPortIdx(t *testing.T) {
+	// Verifies the matched-tracking half of the port-level merge used in
+	// UpdateDevice: a plan declaring a port_idx the device doesn't actually
+	// have (e.g. port 20 on a 16-port switch) must not silently no-op —
+	// it must surface as an error rather than a successful apply that
+	// changed nothing. This replicates the matched-tracking logic in
+	// UpdateDevice's port-merge block without requiring an HTTP round trip.
+	idx15 := int64(15)
+	m := &deviceResourceModel{
+		PortOverrides: []devicePortOverrideModel{
+			{PortIDX: types.Int64Value(15), Forward: types.StringValue("customize")},
+			{PortIDX: types.Int64Value(20), Forward: types.StringValue("customize")},
+		},
+	}
+	existingPorts := []unifi.DevicePortOverrides{
+		{PortIDX: &idx15, Forward: "all", Name: "Port 15"},
+	}
+
+	plannedByPort := map[int64]*devicePortOverrideModel{}
+	for i := range m.PortOverrides {
+		if m.PortOverrides[i].PortIDX.IsNull() || m.PortOverrides[i].PortIDX.IsUnknown() {
+			continue
+		}
+		plannedByPort[m.PortOverrides[i].PortIDX.ValueInt64()] = &m.PortOverrides[i]
+	}
+
+	merged := make([]unifi.DevicePortOverrides, len(existingPorts))
+	copy(merged, existingPorts)
+	matched := make(map[int64]bool, len(plannedByPort))
+	for i := range merged {
+		if merged[i].PortIDX == nil {
+			continue
+		}
+		if planned, ok := plannedByPort[*merged[i].PortIDX]; ok {
+			applyPlannedToPortOverrideEntry(context.Background(), &merged[i], *planned)
+			matched[*merged[i].PortIDX] = true
+		}
+	}
+
+	var missing []int64
+	for idx := range plannedByPort {
+		if !matched[idx] {
+			missing = append(missing, idx)
+		}
+	}
+
+	require.Len(t, missing, 1, "port_idx 20 has no matching live entry and must be reported as missing")
+	assert.Equal(t, int64(20), missing[0])
+	// Port 15, which did match, should still have been applied — the error
+	// path doesn't retroactively undo work already done in the loop (the
+	// real UpdateDevice discards the payload entirely on error, since it
+	// returns before setting payload.PortOverrides).
+	assert.Equal(t, "customize", merged[0].Forward)
+}
