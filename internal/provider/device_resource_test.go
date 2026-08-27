@@ -10,6 +10,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/ubiquiti-community/go-unifi/unifi"
@@ -1729,6 +1730,180 @@ resource "terrifi_device" "test" {
 }
 `, dev.MAC),
 				ExpectError: regexp.MustCompile(`(?i)duplicate.*port_idx`),
+			},
+		},
+	})
+}
+
+// TestAccDeviceResource_portOverrides exercises the full CRUD lifecycle for
+// port_overrides: declaring a port, changing a field, and removing
+// port_overrides entirely to stop managing the port.
+func TestAccDeviceResource_portOverrides(t *testing.T) {
+	if os.Getenv("TF_ACC") == "" {
+		t.Skip("TF_ACC not set")
+	}
+	preCheck(t)
+	sw := findFirstAdoptedSwitchWithPorts(t)
+	if sw == nil {
+		t.Skip("no adopted device with port_overrides found on controller")
+	}
+	idx := *sw.PortOverrides[0].PortIDX
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			// Create: declare one port with one field set.
+			{
+				Config: fmt.Sprintf(`
+resource "terrifi_device" "test" {
+  mac = %q
+
+  port_overrides = [
+    { port_idx = %d, poe_mode = "auto" },
+  ]
+}
+`, sw.MAC, idx),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("terrifi_device.test", "port_overrides.#", "1"),
+					resource.TestCheckResourceAttr("terrifi_device.test", "port_overrides.0.port_idx", fmt.Sprintf("%d", idx)),
+					resource.TestCheckResourceAttr("terrifi_device.test", "port_overrides.0.poe_mode", "auto"),
+					resource.TestCheckNoResourceAttr("terrifi_device.test", "port_overrides.0.forward"),
+				),
+			},
+			// Update: change the field value.
+			{
+				Config: fmt.Sprintf(`
+resource "terrifi_device" "test" {
+  mac = %q
+
+  port_overrides = [
+    { port_idx = %d, poe_mode = "off" },
+  ]
+}
+`, sw.MAC, idx),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("terrifi_device.test", "port_overrides.0.poe_mode", "off"),
+				),
+			},
+			// Remove port_overrides entirely: stops managing the port
+			// (does not reset it — see the "preserves unmanaged ports" test
+			// below for the untouched-port guarantee this relies on).
+			{
+				Config: fmt.Sprintf(`
+resource "terrifi_device" "test" {
+  mac = %q
+}
+`, sw.MAC),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckNoResourceAttr("terrifi_device.test", "port_overrides.#"),
+				),
+			},
+		},
+	})
+}
+
+// TestAccDeviceResource_portOverrides_preservesUnmanagedPorts proves the
+// write-side merge's core safety guarantee end-to-end: applying a config
+// that declares only one port must never change a different, undeclared
+// port's live configuration on the controller.
+func TestAccDeviceResource_portOverrides_preservesUnmanagedPorts(t *testing.T) {
+	if os.Getenv("TF_ACC") == "" {
+		t.Skip("TF_ACC not set")
+	}
+	preCheck(t)
+	sw := findFirstAdoptedSwitchWithPorts(t)
+	if sw == nil || len(sw.PortOverrides) < 2 {
+		t.Skip("need an adopted device with at least 2 port_overrides entries")
+	}
+	managedIdx := *sw.PortOverrides[0].PortIDX
+	untouchedIdx := *sw.PortOverrides[1].PortIDX
+	client := testAccGetClient(t)
+	ctx := t.Context()
+
+	before, err := client.GetDeviceByMAC(ctx, "default", sw.MAC)
+	require.NoError(t, err)
+	var beforeUntouched *unifi.DevicePortOverrides
+	for i := range before.PortOverrides {
+		if before.PortOverrides[i].PortIDX != nil && *before.PortOverrides[i].PortIDX == untouchedIdx {
+			beforeUntouched = &before.PortOverrides[i]
+		}
+	}
+	require.NotNil(t, beforeUntouched, "untouched port must exist on the device before the test applies anything")
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: fmt.Sprintf(`
+resource "terrifi_device" "test" {
+  mac = %q
+
+  port_overrides = [
+    { port_idx = %d, poe_mode = "auto" },
+  ]
+}
+`, sw.MAC, managedIdx),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("terrifi_device.test", "port_overrides.0.poe_mode", "auto"),
+					func(_ *terraform.State) error {
+						after, err := client.GetDeviceByMAC(ctx, "default", sw.MAC)
+						if err != nil {
+							return err
+						}
+						for i := range after.PortOverrides {
+							if after.PortOverrides[i].PortIDX == nil || *after.PortOverrides[i].PortIDX != untouchedIdx {
+								continue
+							}
+							if after.PortOverrides[i].Forward != beforeUntouched.Forward {
+								return fmt.Errorf("unmanaged port %d's forward changed: %q -> %q", untouchedIdx, beforeUntouched.Forward, after.PortOverrides[i].Forward)
+							}
+							if after.PortOverrides[i].PoeMode != beforeUntouched.PoeMode {
+								return fmt.Errorf("unmanaged port %d's poe_mode changed: %q -> %q", untouchedIdx, beforeUntouched.PoeMode, after.PortOverrides[i].PoeMode)
+							}
+							if after.PortOverrides[i].NATiveNetworkID != beforeUntouched.NATiveNetworkID {
+								return fmt.Errorf("unmanaged port %d's native_network_id changed: %q -> %q", untouchedIdx, beforeUntouched.NATiveNetworkID, after.PortOverrides[i].NATiveNetworkID)
+							}
+							return nil
+						}
+						return fmt.Errorf("port %d not found on device after apply", untouchedIdx)
+					},
+				),
+			},
+		},
+	})
+}
+
+// TestAccDeviceResource_portOverrides_import confirms the design decision
+// from the spec: importing a device starts with port_overrides unmanaged
+// (null/absent), regardless of what live port config exists.
+func TestAccDeviceResource_portOverrides_import(t *testing.T) {
+	if os.Getenv("TF_ACC") == "" {
+		t.Skip("TF_ACC not set")
+	}
+	preCheck(t)
+	sw := findFirstAdoptedSwitchWithPorts(t)
+	if sw == nil {
+		t.Skip("no adopted device with port_overrides found on controller")
+	}
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: fmt.Sprintf(`
+resource "terrifi_device" "test" {
+  mac = %q
+}
+`, sw.MAC),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckNoResourceAttr("terrifi_device.test", "port_overrides.#"),
+				),
+			},
+			{
+				ResourceName:      "terrifi_device.test",
+				ImportState:       true,
+				ImportStateVerify: true,
+				ImportStateId:     sw.MAC,
 			},
 		},
 	})
