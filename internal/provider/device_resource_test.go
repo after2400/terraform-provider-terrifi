@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"regexp"
@@ -1197,6 +1198,64 @@ func TestApplyPlannedToRadioEntry(t *testing.T) {
 		assert.Equal(t, "custom", existing.TxPowerMode)
 		assert.True(t, existing.MinRssiEnabled)
 		assert.Equal(t, int64(-70), *existing.MinRssi)
+	})
+}
+
+func TestPortOverridesFromAPI(t *testing.T) {
+	t.Run("only tracked ports are surfaced", func(t *testing.T) {
+		idx15 := int64(15)
+		idx17 := int64(17)
+		idx99 := int64(99) // untracked port on the device
+		dev := &unifi.Device{
+			PortOverrides: []unifi.DevicePortOverrides{
+				{PortIDX: &idx15, Forward: "customize", NATiveNetworkID: "net-infra"},
+				{PortIDX: &idx17, Forward: "all"},
+				{PortIDX: &idx99, Forward: "customize", NATiveNetworkID: "net-media"},
+			},
+		}
+		tracked := []devicePortOverrideModel{
+			{PortIDX: types.Int64Value(15)},
+			{PortIDX: types.Int64Value(17)},
+		}
+
+		result := portOverridesFromAPI(dev, tracked)
+
+		require.Len(t, result, 2)
+		assert.Equal(t, int64(15), result[0].PortIDX.ValueInt64())
+		assert.Equal(t, "customize", result[0].Forward.ValueString())
+		assert.Equal(t, "net-infra", result[0].NativeNetworkID.ValueString())
+		assert.Equal(t, int64(17), result[1].PortIDX.ValueInt64())
+		assert.Equal(t, "all", result[1].Forward.ValueString())
+		assert.True(t, result[1].NativeNetworkID.IsNull())
+	})
+
+	t.Run("no tracked ports returns nil", func(t *testing.T) {
+		idx1 := int64(1)
+		dev := &unifi.Device{PortOverrides: []unifi.DevicePortOverrides{{PortIDX: &idx1}}}
+		result := portOverridesFromAPI(dev, nil)
+		assert.Nil(t, result)
+	})
+
+	t.Run("tracked port missing from live device is dropped", func(t *testing.T) {
+		dev := &unifi.Device{PortOverrides: []unifi.DevicePortOverrides{}}
+		tracked := []devicePortOverrideModel{{PortIDX: types.Int64Value(5)}}
+		result := portOverridesFromAPI(dev, tracked)
+		assert.Empty(t, result)
+	})
+
+	t.Run("excluded_network_ids round-trips", func(t *testing.T) {
+		idx18 := int64(18)
+		dev := &unifi.Device{
+			PortOverrides: []unifi.DevicePortOverrides{
+				{PortIDX: &idx18, ExcludedNetworkIDs: []string{"net-default", "net-work"}},
+			},
+		}
+		tracked := []devicePortOverrideModel{{PortIDX: types.Int64Value(18)}}
+		result := portOverridesFromAPI(dev, tracked)
+		require.Len(t, result, 1)
+		var ids []string
+		result[0].ExcludedNetworkIDs.ElementsAs(context.Background(), &ids, false)
+		assert.Equal(t, []string{"net-default", "net-work"}, ids)
 	})
 }
 

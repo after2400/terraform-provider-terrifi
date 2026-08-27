@@ -108,6 +108,7 @@ type deviceResourceModel struct {
 	Radio24             *deviceRadioSettingsModel `tfsdk:"radio_24"`
 	Radio5              *deviceRadioSettingsModel `tfsdk:"radio_5"`
 	Radio6              *deviceRadioSettingsModel `tfsdk:"radio_6"`
+	PortOverrides       []devicePortOverrideModel `tfsdk:"port_overrides"`
 	// Computed/read-only.
 	Model   types.String `tfsdk:"model"`
 	Type    types.String `tfsdk:"type"`
@@ -123,6 +124,16 @@ type deviceConfigNetworkModel struct {
 	Gateway types.String `tfsdk:"gateway"`
 	DNS1    types.String `tfsdk:"dns1"`
 	DNS2    types.String `tfsdk:"dns2"`
+}
+
+type devicePortOverrideModel struct {
+	PortIDX            types.Int64  `tfsdk:"port_idx"`
+	Forward            types.String `tfsdk:"forward"`
+	OpMode             types.String `tfsdk:"op_mode"`
+	NativeNetworkID    types.String `tfsdk:"native_network_id"`
+	TaggedVLANMgmt     types.String `tfsdk:"tagged_vlan_mgmt"`
+	ExcludedNetworkIDs types.List   `tfsdk:"excluded_network_ids"`
+	PoeMode            types.String `tfsdk:"poe_mode"`
 }
 
 func (r *deviceResource) Metadata(
@@ -297,6 +308,61 @@ func (r *deviceResource) Schema(
 			"radio_24": radioSettingsSchema("2.4 GHz (`ng`)"),
 			"radio_5":  radioSettingsSchema("5 GHz (`na`)"),
 			"radio_6":  radioSettingsSchema("6 GHz (`6e`)"),
+
+			"port_overrides": schema.ListNestedAttribute{
+				MarkdownDescription: "Per-port switch configuration (VLAN/trunk assignment, PoE mode, forward/op mode). " +
+					"Only ports listed here are managed — every other port on the device is left completely untouched, " +
+					"both on create and on update. Omit this attribute entirely to leave all port config unmanaged.",
+				Optional: true,
+				NestedObject: schema.NestedAttributeObject{
+					Attributes: map[string]schema.Attribute{
+						"port_idx": schema.Int64Attribute{
+							MarkdownDescription: "The physical port number this override applies to (1-56).",
+							Required:            true,
+							Validators: []validator.Int64{
+								int64validator.Between(1, 56),
+							},
+						},
+						"forward": schema.StringAttribute{
+							MarkdownDescription: "Forwarding mode: `all`, `native`, `customize`, or `disabled`.",
+							Optional:            true,
+							Validators: []validator.String{
+								stringvalidator.OneOf("all", "native", "customize", "disabled"),
+							},
+						},
+						"op_mode": schema.StringAttribute{
+							MarkdownDescription: "Port operating mode: `switch`, `mirror`, or `aggregate`.",
+							Optional:            true,
+							Validators: []validator.String{
+								stringvalidator.OneOf("switch", "mirror", "aggregate"),
+							},
+						},
+						"native_network_id": schema.StringAttribute{
+							MarkdownDescription: "The ID of the network (see `terrifi_network`) to use as this port's native/untagged VLAN.",
+							Optional:            true,
+						},
+						"tagged_vlan_mgmt": schema.StringAttribute{
+							MarkdownDescription: "Tagged VLAN management mode: `auto`, `block_all`, or `custom`.",
+							Optional:            true,
+							Validators: []validator.String{
+								stringvalidator.OneOf("auto", "block_all", "custom"),
+							},
+						},
+						"excluded_network_ids": schema.ListAttribute{
+							MarkdownDescription: "Network IDs excluded from this port's tagged VLANs. Only meaningful when `tagged_vlan_mgmt = \"custom\"`.",
+							ElementType:         types.StringType,
+							Optional:            true,
+						},
+						"poe_mode": schema.StringAttribute{
+							MarkdownDescription: "PoE mode: `auto`, `pasv24`, `passthrough`, or `off`.",
+							Optional:            true,
+							Validators: []validator.String{
+								stringvalidator.OneOf("auto", "pasv24", "passthrough", "off"),
+							},
+						},
+					},
+				},
+			},
 
 			// Read-only attributes.
 			"model": schema.StringAttribute{
@@ -481,6 +547,11 @@ func (r *deviceResource) Update(
 		return
 	}
 
+	// apiToModel only refreshes ports already present in the target model's
+	// PortOverrides. For Update that target is &state, but we want the
+	// newly-*planned* set of managed ports (which may have added/removed
+	// entries), not the prior state's set.
+	state.PortOverrides = plan.PortOverrides
 	r.apiToModel(device, &state, site)
 	r.preserveNullOptionals(&plan, &state)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
@@ -653,6 +724,56 @@ func radioEntryToModel(rt unifi.DeviceRadioTable) deviceRadioSettingsModel {
 	return settings
 }
 
+// portOverridesFromAPI refreshes only the tracked port entries (matched by
+// port_idx) from the device's live PortOverrides array. Ports not present in
+// tracked are never surfaced — this is what keeps undeclared ports out of
+// state, matching the partial-declaration design (see the port_overrides
+// design spec's "merge semantics" section).
+func portOverridesFromAPI(d *unifi.Device, tracked []devicePortOverrideModel) []devicePortOverrideModel {
+	if len(tracked) == 0 {
+		return nil
+	}
+	byIdx := make(map[int64]unifi.DevicePortOverrides, len(d.PortOverrides))
+	for _, po := range d.PortOverrides {
+		if po.PortIDX != nil {
+			byIdx[*po.PortIDX] = po
+		}
+	}
+	result := make([]devicePortOverrideModel, 0, len(tracked))
+	for _, t := range tracked {
+		idx := t.PortIDX.ValueInt64()
+		po, ok := byIdx[idx]
+		if !ok {
+			continue
+		}
+		result = append(result, portOverrideEntryToModel(idx, po))
+	}
+	return result
+}
+
+// portOverrideEntryToModel converts one API DevicePortOverrides entry into
+// our nested model, covering only the fields this provider manages.
+func portOverrideEntryToModel(idx int64, po unifi.DevicePortOverrides) devicePortOverrideModel {
+	m := devicePortOverrideModel{
+		PortIDX:         types.Int64Value(idx),
+		Forward:         stringValueOrNull(po.Forward),
+		OpMode:          stringValueOrNull(po.OpMode),
+		NativeNetworkID: stringValueOrNull(po.NATiveNetworkID),
+		TaggedVLANMgmt:  stringValueOrNull(po.TaggedVLANMgmt),
+		PoeMode:         stringValueOrNull(po.PoeMode),
+	}
+	if len(po.ExcludedNetworkIDs) > 0 {
+		vals := make([]types.String, len(po.ExcludedNetworkIDs))
+		for i, id := range po.ExcludedNetworkIDs {
+			vals[i] = types.StringValue(id)
+		}
+		m.ExcludedNetworkIDs = types.ListValueMust(types.StringType, toAttrValues(vals))
+	} else {
+		m.ExcludedNetworkIDs = types.ListNull(types.StringType)
+	}
+	return m
+}
+
 func (r *deviceResource) apiToModel(d *unifi.Device, m *deviceResourceModel, site string) {
 	m.ID = types.StringValue(d.ID)
 	m.Site = types.StringValue(site)
@@ -711,6 +832,10 @@ func (r *deviceResource) apiToModel(d *unifi.Device, m *deviceResourceModel, sit
 			m.Radio6 = &settings
 		}
 	}
+
+	// Only surfaces ports already tracked in m.PortOverrides (the caller's
+	// existing value going into this call) — see portOverridesFromAPI.
+	m.PortOverrides = portOverridesFromAPI(d, m.PortOverrides)
 
 	// Read-only fields.
 	m.Model = stringValueOrNull(d.Model)
