@@ -131,17 +131,15 @@ func TestFixRadioTableBytes_decodesIntoUnifiDevice(t *testing.T) {
 
 func TestApplyPlannedToPortOverrideEntry(t *testing.T) {
 	t.Run("updates only non-null modeled fields, preserves everything else", func(t *testing.T) {
-		idx := int64(15)
-		speed := int64(2500)
-		existing := &unifi.DevicePortOverrides{
-			PortIDX:         &idx,
-			Forward:         "all",
-			NATiveNetworkID: "net-default",
-			PoeMode:         "auto",
-			Speed:           &speed,
-			FullDuplex:      true,
-			Isolation:       true,
-			Name:            "Uplink",
+		entry := map[string]any{
+			"port_idx":              float64(15),
+			"forward":               "all",
+			"native_networkconf_id": "net-default",
+			"poe_mode":              "auto",
+			"speed":                 float64(2500),
+			"full_duplex":           true,
+			"isolation":             true,
+			"name":                  "Uplink",
 		}
 		planned := devicePortOverrideModel{
 			PortIDX:            types.Int64Value(15),
@@ -153,25 +151,23 @@ func TestApplyPlannedToPortOverrideEntry(t *testing.T) {
 			ExcludedNetworkIDs: types.ListNull(types.StringType),
 		}
 
-		applyPlannedToPortOverrideEntry(context.Background(), existing, planned)
+		applyPlannedToPortOverrideEntry(context.Background(), entry, planned)
 
 		// Modeled + set fields updated.
-		assert.Equal(t, "customize", existing.Forward)
-		assert.Equal(t, "net-infra", existing.NATiveNetworkID)
+		assert.Equal(t, "customize", entry["forward"])
+		assert.Equal(t, "net-infra", entry["native_networkconf_id"])
 		// Modeled but null-in-plan field left untouched.
-		assert.Equal(t, "auto", existing.PoeMode)
+		assert.Equal(t, "auto", entry["poe_mode"])
 		// Unmodeled fields (speed/duplex/isolation/name) survive unchanged —
 		// this is the core safety property the merge logic must guarantee.
-		require.NotNil(t, existing.Speed)
-		assert.Equal(t, int64(2500), *existing.Speed)
-		assert.True(t, existing.FullDuplex)
-		assert.True(t, existing.Isolation)
-		assert.Equal(t, "Uplink", existing.Name)
+		assert.Equal(t, float64(2500), entry["speed"])
+		assert.Equal(t, true, entry["full_duplex"])
+		assert.Equal(t, true, entry["isolation"])
+		assert.Equal(t, "Uplink", entry["name"])
 	})
 
 	t.Run("sets excluded_network_ids when configured", func(t *testing.T) {
-		idx := int64(18)
-		existing := &unifi.DevicePortOverrides{PortIDX: &idx}
+		entry := map[string]any{"port_idx": float64(18)}
 		planned := devicePortOverrideModel{
 			PortIDX: types.Int64Value(18),
 			ExcludedNetworkIDs: types.ListValueMust(types.StringType, []attr.Value{
@@ -179,86 +175,110 @@ func TestApplyPlannedToPortOverrideEntry(t *testing.T) {
 				types.StringValue("net-work"),
 			}),
 		}
-		applyPlannedToPortOverrideEntry(context.Background(), existing, planned)
-		assert.Equal(t, []string{"net-default", "net-work"}, existing.ExcludedNetworkIDs)
+		applyPlannedToPortOverrideEntry(context.Background(), entry, planned)
+		assert.Equal(t, []string{"net-default", "net-work"}, entry["excluded_networkconf_ids"])
 	})
 
 	t.Run("leaves excluded_network_ids untouched when null in plan", func(t *testing.T) {
-		idx := int64(18)
-		existing := &unifi.DevicePortOverrides{
-			PortIDX:            &idx,
-			ExcludedNetworkIDs: []string{"net-default"},
+		entry := map[string]any{
+			"port_idx":                 float64(18),
+			"excluded_networkconf_ids": []string{"net-default"},
 		}
 		planned := devicePortOverrideModel{
 			PortIDX:            types.Int64Value(18),
 			ExcludedNetworkIDs: types.ListNull(types.StringType),
 		}
-		applyPlannedToPortOverrideEntry(context.Background(), existing, planned)
-		assert.Equal(t, []string{"net-default"}, existing.ExcludedNetworkIDs)
+		applyPlannedToPortOverrideEntry(context.Background(), entry, planned)
+		assert.Equal(t, []string{"net-default"}, entry["excluded_networkconf_ids"])
+	})
+
+	// This is the test that would have caught Finding 1: the old
+	// implementation operated on the typed unifi.DevicePortOverrides struct,
+	// whose `omitempty` tag on every boolean field silently drops "false"
+	// values on marshal. Operating on map[string]any and asserting on the
+	// actual marshaled JSON bytes (not just the in-memory Go value) proves
+	// the field survives serialization onto the wire.
+	t.Run("unmodeled false boolean survives serialization", func(t *testing.T) {
+		entry := map[string]any{
+			"port_idx":               float64(15),
+			"autoneg":                false,
+			"stp_port_mode":          false,
+			"flow_control_enabled":   false,
+			"lldpmed_enabled":        false,
+			"port_keepalive_enabled": false,
+		}
+		planned := devicePortOverrideModel{
+			PortIDX: types.Int64Value(15),
+			PoeMode: types.StringValue("off"), // touch an unrelated field
+		}
+
+		applyPlannedToPortOverrideEntry(context.Background(), entry, planned)
+
+		b, err := json.Marshal(entry)
+		require.NoError(t, err)
+		s := string(b)
+
+		assert.Contains(t, s, `"autoneg":false`)
+		assert.Contains(t, s, `"stp_port_mode":false`)
+		assert.Contains(t, s, `"flow_control_enabled":false`)
+		assert.Contains(t, s, `"lldpmed_enabled":false`)
+		assert.Contains(t, s, `"port_keepalive_enabled":false`)
+		assert.Contains(t, s, `"poe_mode":"off"`)
 	})
 }
 
-func TestUpdateDevicePayload_portOverrides_touchesOnlyDeclaredPorts(t *testing.T) {
-	// Verifies the port-level half of the merge directly against the
-	// plannedByPort map-building logic used in UpdateDevice: a plan
-	// declaring port 15 must never produce a payload entry that mutates
-	// port 17's data. This exercises the same map-keying logic UpdateDevice
-	// uses, without requiring an HTTP round trip.
-	idx15 := int64(15)
-	idx17 := int64(17)
-	m := &deviceResourceModel{
-		PortOverrides: []devicePortOverrideModel{
-			{PortIDX: types.Int64Value(15), Forward: types.StringValue("customize")},
-		},
-	}
-	existingPorts := []unifi.DevicePortOverrides{
-		{PortIDX: &idx15, Forward: "all", Name: "Port 15"},
-		{PortIDX: &idx17, Forward: "all", Name: "Port 17"},
-	}
+// mergePortOverridesForTest replicates the raw-JSON merge logic in
+// UpdateDevice's port-merge block (see device_api.go), so the port-level
+// merge semantics (declared-port isolation and append-on-no-match) can be
+// exercised directly against []json.RawMessage without an HTTP round trip.
+func mergePortOverridesForTest(t *testing.T, rawPorts []json.RawMessage, plannedByPort map[int64]*devicePortOverrideModel) []map[string]any {
+	t.Helper()
 
-	plannedByPort := map[int64]*devicePortOverrideModel{}
-	for i := range m.PortOverrides {
-		if m.PortOverrides[i].PortIDX.IsNull() || m.PortOverrides[i].PortIDX.IsUnknown() {
+	merged := make([]json.RawMessage, 0, len(rawPorts)+len(plannedByPort))
+	matched := make(map[int64]bool, len(plannedByPort))
+
+	for _, raw := range rawPorts {
+		var entry map[string]any
+		require.NoError(t, json.Unmarshal(raw, &entry))
+		idxFloat, ok := entry["port_idx"].(float64)
+		if !ok {
+			merged = append(merged, raw)
 			continue
 		}
-		plannedByPort[m.PortOverrides[i].PortIDX.ValueInt64()] = &m.PortOverrides[i]
-	}
-
-	merged := make([]unifi.DevicePortOverrides, len(existingPorts))
-	copy(merged, existingPorts)
-	for i := range merged {
-		if merged[i].PortIDX == nil {
+		idx := int64(idxFloat)
+		planned, ok := plannedByPort[idx]
+		if !ok {
+			merged = append(merged, raw)
 			continue
 		}
-		if planned, ok := plannedByPort[*merged[i].PortIDX]; ok {
-			applyPlannedToPortOverrideEntry(context.Background(), &merged[i], *planned)
-		}
+		applyPlannedToPortOverrideEntry(context.Background(), entry, *planned)
+		b, err := json.Marshal(entry)
+		require.NoError(t, err)
+		merged = append(merged, b)
+		matched[idx] = true
 	}
 
-	require.Len(t, merged, 2)
-	assert.Equal(t, "customize", merged[0].Forward, "declared port 15 should be updated")
-	assert.Equal(t, "all", merged[1].Forward, "undeclared port 17 must be untouched")
-	assert.Equal(t, "Port 17", merged[1].Name)
+	for idx, planned := range plannedByPort {
+		if matched[idx] {
+			continue
+		}
+		entry := map[string]any{"port_idx": idx}
+		applyPlannedToPortOverrideEntry(context.Background(), entry, *planned)
+		b, err := json.Marshal(entry)
+		require.NoError(t, err)
+		merged = append(merged, b)
+	}
+
+	result := make([]map[string]any, len(merged))
+	for i, raw := range merged {
+		var entry map[string]any
+		require.NoError(t, json.Unmarshal(raw, &entry))
+		result[i] = entry
+	}
+	return result
 }
 
-func TestUpdateDevicePayload_portOverrides_errorsOnUnmatchedPortIdx(t *testing.T) {
-	// Verifies the matched-tracking half of the port-level merge used in
-	// UpdateDevice: a plan declaring a port_idx the device doesn't actually
-	// have (e.g. port 20 on a 16-port switch) must not silently no-op —
-	// it must surface as an error rather than a successful apply that
-	// changed nothing. This replicates the matched-tracking logic in
-	// UpdateDevice's port-merge block without requiring an HTTP round trip.
-	idx15 := int64(15)
-	m := &deviceResourceModel{
-		PortOverrides: []devicePortOverrideModel{
-			{PortIDX: types.Int64Value(15), Forward: types.StringValue("customize")},
-			{PortIDX: types.Int64Value(20), Forward: types.StringValue("customize")},
-		},
-	}
-	existingPorts := []unifi.DevicePortOverrides{
-		{PortIDX: &idx15, Forward: "all", Name: "Port 15"},
-	}
-
+func buildPlannedByPort(m *deviceResourceModel) map[int64]*devicePortOverrideModel {
 	plannedByPort := map[int64]*devicePortOverrideModel{}
 	for i := range m.PortOverrides {
 		if m.PortOverrides[i].PortIDX.IsNull() || m.PortOverrides[i].PortIDX.IsUnknown() {
@@ -266,32 +286,52 @@ func TestUpdateDevicePayload_portOverrides_errorsOnUnmatchedPortIdx(t *testing.T
 		}
 		plannedByPort[m.PortOverrides[i].PortIDX.ValueInt64()] = &m.PortOverrides[i]
 	}
+	return plannedByPort
+}
 
-	merged := make([]unifi.DevicePortOverrides, len(existingPorts))
-	copy(merged, existingPorts)
-	matched := make(map[int64]bool, len(plannedByPort))
-	for i := range merged {
-		if merged[i].PortIDX == nil {
-			continue
-		}
-		if planned, ok := plannedByPort[*merged[i].PortIDX]; ok {
-			applyPlannedToPortOverrideEntry(context.Background(), &merged[i], *planned)
-			matched[*merged[i].PortIDX] = true
-		}
+func TestUpdateDevicePayload_portOverrides_touchesOnlyDeclaredPorts(t *testing.T) {
+	// Verifies the port-level half of the merge: a plan declaring port 15
+	// must never produce a payload entry that mutates port 17's data.
+	m := &deviceResourceModel{
+		PortOverrides: []devicePortOverrideModel{
+			{PortIDX: types.Int64Value(15), Forward: types.StringValue("customize")},
+		},
+	}
+	rawPorts := []json.RawMessage{
+		json.RawMessage(`{"port_idx":15,"forward":"all","name":"Port 15"}`),
+		json.RawMessage(`{"port_idx":17,"forward":"all","name":"Port 17"}`),
 	}
 
-	var missing []int64
-	for idx := range plannedByPort {
-		if !matched[idx] {
-			missing = append(missing, idx)
-		}
+	merged := mergePortOverridesForTest(t, rawPorts, buildPlannedByPort(m))
+
+	require.Len(t, merged, 2)
+	assert.Equal(t, "customize", merged[0]["forward"], "declared port 15 should be updated")
+	assert.Equal(t, "all", merged[1]["forward"], "undeclared port 17 must be untouched")
+	assert.Equal(t, "Port 17", merged[1]["name"])
+}
+
+func TestUpdateDevicePayload_portOverrides_appendsUnmatchedPortIdx(t *testing.T) {
+	// Verifies Finding 2's fix: a declared port_idx with no existing live
+	// entry (e.g. a factory-default port that has never been customized)
+	// must get a brand-new entry appended, not error out. Existing entries
+	// must be left untouched.
+	m := &deviceResourceModel{
+		PortOverrides: []devicePortOverrideModel{
+			{PortIDX: types.Int64Value(15), Forward: types.StringValue("customize")},
+			{PortIDX: types.Int64Value(20), PoeMode: types.StringValue("off")},
+		},
+	}
+	rawPorts := []json.RawMessage{
+		json.RawMessage(`{"port_idx":15,"forward":"all","name":"Port 15"}`),
 	}
 
-	require.Len(t, missing, 1, "port_idx 20 has no matching live entry and must be reported as missing")
-	assert.Equal(t, int64(20), missing[0])
-	// Port 15, which did match, should still have been applied — the error
-	// path doesn't retroactively undo work already done in the loop (the
-	// real UpdateDevice discards the payload entirely on error, since it
-	// returns before setting payload.PortOverrides).
-	assert.Equal(t, "customize", merged[0].Forward)
+	merged := mergePortOverridesForTest(t, rawPorts, buildPlannedByPort(m))
+
+	require.Len(t, merged, 2)
+	assert.Equal(t, "customize", merged[0]["forward"], "existing port 15 entry should be updated")
+	assert.Equal(t, "Port 15", merged[0]["name"], "existing port 15's unmodeled fields survive")
+
+	assert.Equal(t, float64(20), merged[1]["port_idx"], "new entry appended for port 20")
+	assert.Equal(t, "off", merged[1]["poe_mode"])
+	assert.NotContains(t, merged[1], "forward", "new entry only contains modeled+set fields")
 }

@@ -56,7 +56,11 @@ type deviceUpdatePayload struct {
 	Volume                     *int64                      `json:"volume,omitempty"`
 	ConfigNetwork              *deviceConfigNetworkPayload `json:"config_network,omitempty"`
 	RadioTable                 []unifi.DeviceRadioTable    `json:"radio_table,omitempty"`
-	PortOverrides              []unifi.DevicePortOverrides `json:"port_overrides,omitempty"`
+	// PortOverrides is sent as raw JSON blobs rather than the typed
+	// unifi.DevicePortOverrides struct. See fetchDevicePortOverridesRaw for
+	// why: the typed struct's omitempty tags on every boolean field would
+	// silently drop e.g. "autoneg": false on a decode/re-encode round trip.
+	PortOverrides []json.RawMessage `json:"port_overrides,omitempty"`
 }
 
 type deviceConfigNetworkPayload struct {
@@ -94,30 +98,31 @@ func applyPlannedToRadioEntry(rt *unifi.DeviceRadioTable, planned deviceRadioSet
 }
 
 // applyPlannedToPortOverrideEntry updates only the user-configured fields in
-// an existing DevicePortOverrides entry, preserving every other field
-// (speed/duplex, 802.1X, storm control, LACP, etc.) that this provider
-// doesn't model. This is the field-level half of the two-level merge — see
-// UpdateDevice for the port-level half.
-func applyPlannedToPortOverrideEntry(ctx context.Context, po *unifi.DevicePortOverrides, planned devicePortOverrideModel) {
+// a raw port_overrides JSON entry (decoded to map[string]any), preserving
+// every other key byte-for-byte — including boolean fields the SDK's typed
+// unifi.DevicePortOverrides struct would silently drop from a re-marshal via
+// omitempty (see fetchDevicePortOverridesRaw). This is the field-level half
+// of the two-level merge — see UpdateDevice for the port-level half.
+func applyPlannedToPortOverrideEntry(ctx context.Context, entry map[string]any, planned devicePortOverrideModel) {
 	if !planned.Forward.IsNull() && !planned.Forward.IsUnknown() {
-		po.Forward = planned.Forward.ValueString()
+		entry["forward"] = planned.Forward.ValueString()
 	}
 	if !planned.OpMode.IsNull() && !planned.OpMode.IsUnknown() {
-		po.OpMode = planned.OpMode.ValueString()
+		entry["op_mode"] = planned.OpMode.ValueString()
 	}
 	if !planned.NativeNetworkID.IsNull() && !planned.NativeNetworkID.IsUnknown() {
-		po.NATiveNetworkID = planned.NativeNetworkID.ValueString()
+		entry["native_networkconf_id"] = planned.NativeNetworkID.ValueString()
 	}
 	if !planned.TaggedVLANMgmt.IsNull() && !planned.TaggedVLANMgmt.IsUnknown() {
-		po.TaggedVLANMgmt = planned.TaggedVLANMgmt.ValueString()
+		entry["tagged_vlan_mgmt"] = planned.TaggedVLANMgmt.ValueString()
 	}
 	if !planned.PoeMode.IsNull() && !planned.PoeMode.IsUnknown() {
-		po.PoeMode = planned.PoeMode.ValueString()
+		entry["poe_mode"] = planned.PoeMode.ValueString()
 	}
 	if !planned.ExcludedNetworkIDs.IsNull() && !planned.ExcludedNetworkIDs.IsUnknown() {
 		var ids []string
 		planned.ExcludedNetworkIDs.ElementsAs(ctx, &ids, false)
-		po.ExcludedNetworkIDs = ids
+		entry["excluded_networkconf_ids"] = ids
 	}
 }
 
@@ -202,51 +207,82 @@ func (c *Client) UpdateDevice(ctx context.Context, site string, id string, m *de
 		plannedByPort[m.PortOverrides[i].PortIDX.ValueInt64()] = &m.PortOverrides[i]
 	}
 
-	if len(plannedByRadio) > 0 || len(plannedByPort) > 0 {
-		// Read-modify-write: fetch current device to preserve non-managed
-		// radio and port_overrides fields, and entries not mentioned in the
-		// plan (port-level half of the merge — see
-		// applyPlannedToPortOverrideEntry for the field-level half).
+	if len(plannedByRadio) > 0 {
+		// Read-modify-write: fetch the current device to preserve
+		// non-managed radio entries and fields.
 		existing, err := c.GetDevice(ctx, site, id)
 		if err != nil {
-			return fmt.Errorf("reading device for radio/port_overrides merge: %w", err)
+			return fmt.Errorf("reading device for radio merge: %w", err)
 		}
 
-		if len(plannedByRadio) > 0 {
-			radioTable := make([]unifi.DeviceRadioTable, len(existing.RadioTable))
-			copy(radioTable, existing.RadioTable)
-			for i := range radioTable {
-				if planned, ok := plannedByRadio[radioTable[i].Radio]; ok {
-					applyPlannedToRadioEntry(&radioTable[i], *planned)
-				}
+		radioTable := make([]unifi.DeviceRadioTable, len(existing.RadioTable))
+		copy(radioTable, existing.RadioTable)
+		for i := range radioTable {
+			if planned, ok := plannedByRadio[radioTable[i].Radio]; ok {
+				applyPlannedToRadioEntry(&radioTable[i], *planned)
 			}
-			payload.RadioTable = radioTable
+		}
+		payload.RadioTable = radioTable
+	}
+
+	if len(plannedByPort) > 0 {
+		// Read-modify-write against the raw (undecoded) port_overrides JSON —
+		// see fetchDevicePortOverridesRaw for why we avoid the typed SDK
+		// struct here. This preserves non-managed ports and non-managed
+		// fields on declared ports byte-for-byte (port-level and field-level
+		// halves of the merge, respectively — see
+		// applyPlannedToPortOverrideEntry for the field-level half).
+		rawPorts, err := c.fetchDevicePortOverridesRaw(ctx, site, m.MAC.ValueString())
+		if err != nil {
+			return fmt.Errorf("reading device port_overrides for merge: %w", err)
 		}
 
-		if len(plannedByPort) > 0 {
-			portOverrides := make([]unifi.DevicePortOverrides, len(existing.PortOverrides))
-			copy(portOverrides, existing.PortOverrides)
-			matched := make(map[int64]bool, len(plannedByPort))
-			for i := range portOverrides {
-				if portOverrides[i].PortIDX == nil {
-					continue
-				}
-				if planned, ok := plannedByPort[*portOverrides[i].PortIDX]; ok {
-					applyPlannedToPortOverrideEntry(ctx, &portOverrides[i], *planned)
-					matched[*portOverrides[i].PortIDX] = true
-				}
+		merged := make([]json.RawMessage, 0, len(rawPorts)+len(plannedByPort))
+		matched := make(map[int64]bool, len(plannedByPort))
+
+		for i, raw := range rawPorts {
+			var entry map[string]any
+			if err := json.Unmarshal(raw, &entry); err != nil {
+				return fmt.Errorf("decoding port_overrides[%d]: %w", i, err)
 			}
-			// A declared port_idx with no matching live entry silently would
-			// not apply — the schema only bounds port_idx to the protocol
-			// max (1-56), not this device's actual port count. Fail loudly
-			// rather than report a successful apply that changed nothing.
-			for idx := range plannedByPort {
-				if !matched[idx] {
-					return fmt.Errorf("port_overrides declares port_idx %d, but the device has no port_overrides entry for that port (the device may have fewer physical ports than declared)", idx)
-				}
+			idxFloat, ok := entry["port_idx"].(float64)
+			if !ok {
+				merged = append(merged, raw) // no port_idx on this entry — leave byte-for-byte untouched
+				continue
 			}
-			payload.PortOverrides = portOverrides
+			idx := int64(idxFloat)
+			planned, ok := plannedByPort[idx]
+			if !ok {
+				merged = append(merged, raw) // undeclared port — leave byte-for-byte untouched
+				continue
+			}
+			applyPlannedToPortOverrideEntry(ctx, entry, *planned)
+			b, err := json.Marshal(entry)
+			if err != nil {
+				return fmt.Errorf("encoding merged port_overrides[%d]: %w", i, err)
+			}
+			merged = append(merged, b)
+			matched[idx] = true
 		}
+
+		// A declared port with no existing live entry gets a brand-new entry
+		// appended, matching what the controller UI does when you customize a
+		// previously-untouched port. port_overrides is a sparse array on the
+		// controller — factory-default ports often have no entry at all.
+		for idx, planned := range plannedByPort {
+			if matched[idx] {
+				continue
+			}
+			entry := map[string]any{"port_idx": idx}
+			applyPlannedToPortOverrideEntry(ctx, entry, *planned)
+			b, err := json.Marshal(entry)
+			if err != nil {
+				return fmt.Errorf("encoding new port_overrides entry for port_idx %d: %w", idx, err)
+			}
+			merged = append(merged, b)
+		}
+
+		payload.PortOverrides = merged
 	}
 
 	// Use the v1 REST API endpoint for device updates.
@@ -355,6 +391,35 @@ func (c *Client) GetDeviceByMAC(ctx context.Context, site, mac string) (*unifi.D
 	}
 	d := devices[0]
 	return &d, nil
+}
+
+// fetchDevicePortOverridesRaw fetches one device's port_overrides array as raw
+// JSON blobs (not decoded into unifi.DevicePortOverrides), so unmanaged ports'
+// exact wire bytes can be passed straight through the merge/PUT untouched —
+// avoiding the SDK's DevicePortOverrides struct, whose omitempty tags on every
+// boolean field would silently drop e.g. "autoneg": false on a normal
+// marshal/unmarshal round trip. See UpdateDevice for how this is used.
+func (c *Client) fetchDevicePortOverridesRaw(ctx context.Context, site, mac string) ([]json.RawMessage, error) {
+	url := fmt.Sprintf("%s%s/api/s/%s/stat/device/%s", c.BaseURL, c.APIPath, site, strings.ToLower(mac))
+	var envelope struct {
+		Meta struct {
+			RC  string `json:"rc"`
+			Msg string `json:"msg,omitempty"`
+		} `json:"meta"`
+		Data []struct {
+			PortOverrides []json.RawMessage `json:"port_overrides"`
+		} `json:"data"`
+	}
+	if err := c.doV2Request(ctx, http.MethodGet, url, nil, &envelope); err != nil {
+		return nil, err
+	}
+	if envelope.Meta.RC != "" && envelope.Meta.RC != "ok" {
+		return nil, fmt.Errorf("controller returned rc=%s msg=%s", envelope.Meta.RC, envelope.Meta.Msg)
+	}
+	if len(envelope.Data) == 0 {
+		return nil, &unifi.NotFoundError{}
+	}
+	return envelope.Data[0].PortOverrides, nil
 }
 
 // GetDevice fetches a device by its controller ID. The v1 stat/device endpoint

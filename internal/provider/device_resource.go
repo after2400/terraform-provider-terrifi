@@ -8,6 +8,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -736,6 +737,13 @@ func preserveNullPortOverrides(planned, result []devicePortOverrideModel) {
 		}
 		if p.ExcludedNetworkIDs.IsNull() {
 			result[i].ExcludedNetworkIDs = types.ListNull(types.StringType)
+		} else if !p.ExcludedNetworkIDs.IsUnknown() && len(p.ExcludedNetworkIDs.Elements()) == 0 {
+			// Planned value is a non-null, explicitly-empty list (e.g.
+			// excluded_network_ids = []) — the result's shape must match
+			// what the user declared, not whatever portOverrideEntryToModel
+			// derived from the live API (which cannot distinguish "field
+			// absent" from "field present but empty").
+			result[i].ExcludedNetworkIDs = types.ListValueMust(types.StringType, []attr.Value{})
 		}
 	}
 }
@@ -767,8 +775,11 @@ func radioEntryToModel(rt unifi.DeviceRadioTable) deviceRadioSettingsModel {
 // state, matching the partial-declaration design (see the port_overrides
 // design spec's "merge semantics" section).
 func portOverridesFromAPI(d *unifi.Device, tracked []devicePortOverrideModel) []devicePortOverrideModel {
-	if len(tracked) == 0 {
+	if tracked == nil {
 		return nil
+	}
+	if len(tracked) == 0 {
+		return []devicePortOverrideModel{}
 	}
 	byIdx := make(map[int64]unifi.DevicePortOverrides, len(d.PortOverrides))
 	for _, po := range d.PortOverrides {

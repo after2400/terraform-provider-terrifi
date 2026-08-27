@@ -1238,6 +1238,17 @@ func TestPortOverridesFromAPI(t *testing.T) {
 		assert.Nil(t, result)
 	})
 
+	t.Run("non-nil empty tracked returns non-nil empty slice, not nil", func(t *testing.T) {
+		// Regression test for Finding 3: port_overrides = [] in config must
+		// produce a non-nil empty state value, not null, or Terraform reports
+		// "Provider produced inconsistent result after apply."
+		idx1 := int64(1)
+		dev := &unifi.Device{PortOverrides: []unifi.DevicePortOverrides{{PortIDX: &idx1}}}
+		result := portOverridesFromAPI(dev, []devicePortOverrideModel{})
+		assert.NotNil(t, result)
+		assert.Equal(t, []devicePortOverrideModel{}, result)
+	})
+
 	t.Run("tracked port missing from live device is dropped", func(t *testing.T) {
 		dev := &unifi.Device{PortOverrides: []unifi.DevicePortOverrides{}}
 		tracked := []devicePortOverrideModel{{PortIDX: types.Int64Value(5)}}
@@ -1704,6 +1715,31 @@ func TestPreserveNullPortOverrides(t *testing.T) {
 		}
 		preserveNullPortOverrides(nil, result)
 		assert.Equal(t, "all", result[0].Forward.ValueString())
+	})
+
+	t.Run("explicit empty excluded_network_ids in plan produces non-null empty result", func(t *testing.T) {
+		// Regression test for Finding 4: excluded_network_ids = [] in config
+		// (a legitimate "exclude nothing" declaration) must not be clobbered
+		// into null by whatever the live API happened to return.
+		planned := []devicePortOverrideModel{
+			{
+				PortIDX:            types.Int64Value(15),
+				ExcludedNetworkIDs: types.ListValueMust(types.StringType, []attr.Value{}),
+			},
+		}
+		result := []devicePortOverrideModel{
+			{
+				PortIDX: types.Int64Value(15),
+				ExcludedNetworkIDs: types.ListValueMust(types.StringType, []attr.Value{
+					types.StringValue("net-default"),
+				}),
+			},
+		}
+
+		preserveNullPortOverrides(planned, result)
+
+		assert.False(t, result[0].ExcludedNetworkIDs.IsNull(), "explicit empty list in plan must not become null")
+		assert.Empty(t, result[0].ExcludedNetworkIDs.Elements())
 	})
 }
 

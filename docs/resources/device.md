@@ -132,7 +132,9 @@ resource "terrifi_device" "core_switch" {
 
 Only ports listed in `port_overrides` are managed — every other port on the device is left completely untouched, both on create and on update. Fields omitted within a declared port entry are also left unchanged on the controller. Removing a port's entry from this list stops managing it; it does not reset the port's configuration.
 
-Use `terrifi generate-imports terrifi_device` to get a starting `port_overrides` block populated from a device's current live configuration — see [CLI](../index.md#cli).
+Declaring a `port_idx` that has no existing override on the controller (for example, a factory-default port that has never been customized) creates a fresh override entry rather than erroring.
+
+Use `terrifi generate-imports terrifi_device` to get a starting `port_overrides` block populated from a device's current live configuration — see [CLI](../index.md#cli). Its output includes every port that already has a live override entry; trim the generated block down to only the ports you actually intend to manage before applying, since every port left in the block comes under Terraform management.
 
 ### Using with device data source
 
@@ -232,3 +234,5 @@ You can also use the [Terrifi CLI](../index.md#cli) to generate import blocks fo
 ```shell
 terrifi generate-imports terrifi_device
 ```
+
+`port_overrides` starts unmanaged (null) after `terraform import` — the provider has no way to infer which ports you intend to manage from a live device alone.
