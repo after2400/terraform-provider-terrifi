@@ -106,6 +106,7 @@ type deviceResourceModel struct {
 	SnmpLocation        types.String              `tfsdk:"snmp_location"`
 	Volume              types.Int64               `tfsdk:"volume"`
 	ConfigNetwork       *deviceConfigNetworkModel `tfsdk:"config_network"`
+	MgmtNetworkID       types.String              `tfsdk:"mgmt_network_id"`
 	Radio24             *deviceRadioSettingsModel `tfsdk:"radio_24"`
 	Radio5              *deviceRadioSettingsModel `tfsdk:"radio_5"`
 	Radio6              *deviceRadioSettingsModel `tfsdk:"radio_6"`
@@ -267,6 +268,14 @@ func (r *deviceResource) Schema(
 				Validators: []validator.Int64{
 					int64validator.Between(0, 100),
 				},
+			},
+
+			"mgmt_network_id": schema.StringAttribute{
+				MarkdownDescription: "ID of the network the device's management traffic uses (the Network Override " +
+					"in the UniFi UI), normally a `terrifi_network.<name>.id`. " +
+					"Omit to leave the device's current setting unchanged. Removing the attribute later does not " +
+					"clear the override on the controller; clear it in the UI.",
+				Optional: true,
 			},
 
 			"config_network": schema.SingleNestedAttribute{
@@ -647,6 +656,9 @@ func (r *deviceResource) preserveNullOptionals(plan, state *deviceResourceModel)
 	if plan.Volume.IsNull() {
 		state.Volume = types.Int64Null()
 	}
+	if plan.MgmtNetworkID.IsNull() {
+		state.MgmtNetworkID = types.StringNull()
+	}
 	if plan.ConfigNetwork == nil {
 		state.ConfigNetwork = nil
 	} else if state.ConfigNetwork != nil {
@@ -852,6 +864,8 @@ func (r *deviceResource) apiToModel(d *unifi.Device, m *deviceResourceModel, sit
 	} else {
 		m.Volume = types.Int64Null()
 	}
+
+	m.MgmtNetworkID = stringValueOrNull(d.MgmtNetworkID)
 
 	if d.ConfigNetwork != nil && d.ConfigNetwork.Type != "" {
 		m.ConfigNetwork = &deviceConfigNetworkModel{
