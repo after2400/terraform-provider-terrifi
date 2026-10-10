@@ -58,7 +58,7 @@ resource "terrifi_network" "cameras" {
 - `dhcp_dns` (List of String) — List of DNS servers for DHCP clients. Maximum 4 servers.
 - `internet_access_enabled` (Boolean) — Whether internet access is enabled on this network. Defaults to `true`.
 - `mdns_enabled` (Boolean) — Whether multicast DNS (mDNS) reflection is enabled on this network (Settings → Networks → Multicast DNS in the UniFi UI), needed for AirPlay-style discovery across networks. Only valid for `corporate` networks. Omit to leave the controller's current value unchanged; a new network starts with `false`.
-- `network_isolation_enabled` (Boolean) — Whether client device isolation is enabled on this network, so clients cannot reach each other. Only valid for `corporate` networks. Omit to leave the controller's current value unchanged; a new network starts with `false`.
+- `network_isolation_enabled` (Boolean) — Maps to the controller's `network_isolation_enabled` network setting, which isolates this network from other networks. It is not the per-SSID Client Device Isolation (`l2_isolation` on a WLAN). Only valid for `corporate` networks. Omit to leave the controller's current value unchanged; a new network starts with `false`.
 - `site` (String) — The site to associate the network with. Defaults to the provider site. Changing this forces a new resource.
 
 ### Read-Only
