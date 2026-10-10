@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/ubiquiti-community/go-unifi/unifi"
@@ -124,4 +125,23 @@ func TestFixRadioTableBytes_decodesIntoUnifiDevice(t *testing.T) {
 	assert.Equal(t, "149", d.RadioTable[1].Channel)
 	assert.Equal(t, "23", d.RadioTable[1].TxPower)
 	assert.Equal(t, "high", d.RadioTable[1].TxPowerMode)
+}
+
+func TestDeviceBandsteeringMode(t *testing.T) {
+	set, err := json.Marshal(deviceUpdatePayload{Name: "ap", BandsteeringMode: "prefer_5g"})
+	require.NoError(t, err)
+	assert.Contains(t, string(set), `"bandsteering_mode":"prefer_5g"`)
+
+	unset, err := json.Marshal(deviceUpdatePayload{Name: "ap"})
+	require.NoError(t, err)
+	assert.NotContains(t, string(unset), "bandsteering_mode")
+
+	r := &deviceResource{}
+	var read deviceResourceModel
+	r.apiToModel(&unifi.Device{MAC: "aa:bb:cc:dd:ee:ff", BandsteeringMode: "equal"}, &read, "default")
+	assert.Equal(t, types.StringValue("equal"), read.BandsteeringMode)
+
+	// A config that doesn't declare it must not see the live value as drift.
+	r.preserveNullOptionals(&deviceResourceModel{BandsteeringMode: types.StringNull()}, &read)
+	assert.True(t, read.BandsteeringMode.IsNull())
 }

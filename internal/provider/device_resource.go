@@ -103,6 +103,7 @@ type deviceResourceModel struct {
 	Disabled            types.Bool                `tfsdk:"disabled"`
 	SnmpContact         types.String              `tfsdk:"snmp_contact"`
 	SnmpLocation        types.String              `tfsdk:"snmp_location"`
+	BandsteeringMode    types.String              `tfsdk:"bandsteering_mode"`
 	Volume              types.Int64               `tfsdk:"volume"`
 	ConfigNetwork       *deviceConfigNetworkModel `tfsdk:"config_network"`
 	Radio24             *deviceRadioSettingsModel `tfsdk:"radio_24"`
@@ -246,6 +247,16 @@ func (r *deviceResource) Schema(
 				Optional: true,
 				Validators: []validator.String{
 					stringvalidator.LengthAtMost(255),
+				},
+			},
+
+			"bandsteering_mode": schema.StringAttribute{
+				MarkdownDescription: "Band steering mode for an access point: `off`, `equal` (balance clients " +
+					"across bands) or `prefer_5g` (steer capable clients to 5 GHz). Omit to leave the device's " +
+					"current setting unchanged; to turn it off after setting it, use `off`.",
+				Optional: true,
+				Validators: []validator.String{
+					stringvalidator.OneOf("off", "equal", "prefer_5g"),
 				},
 			},
 
@@ -571,6 +582,9 @@ func (r *deviceResource) preserveNullOptionals(plan, state *deviceResourceModel)
 	if plan.SnmpLocation.IsNull() {
 		state.SnmpLocation = types.StringNull()
 	}
+	if plan.BandsteeringMode.IsNull() {
+		state.BandsteeringMode = types.StringNull()
+	}
 	if plan.Volume.IsNull() {
 		state.Volume = types.Int64Null()
 	}
@@ -678,6 +692,7 @@ func (r *deviceResource) apiToModel(d *unifi.Device, m *deviceResourceModel, sit
 	m.Disabled = types.BoolValue(d.Disabled)
 	m.SnmpContact = stringValueOrNull(d.SnmpContact)
 	m.SnmpLocation = stringValueOrNull(d.SnmpLocation)
+	m.BandsteeringMode = stringValueOrNull(d.BandsteeringMode)
 	if d.Volume != nil {
 		m.Volume = types.Int64Value(*d.Volume)
 	} else {
