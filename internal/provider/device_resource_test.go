@@ -1,13 +1,16 @@
 package provider
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"regexp"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/ubiquiti-community/go-unifi/unifi"
@@ -1200,6 +1203,75 @@ func TestApplyPlannedToRadioEntry(t *testing.T) {
 	})
 }
 
+func TestPortOverridesFromAPI(t *testing.T) {
+	t.Run("only tracked ports are surfaced", func(t *testing.T) {
+		idx15 := int64(15)
+		idx17 := int64(17)
+		idx99 := int64(99) // untracked port on the device
+		dev := &unifi.Device{
+			PortOverrides: []unifi.DevicePortOverrides{
+				{PortIDX: &idx15, Forward: "customize", NATiveNetworkID: "net-infra"},
+				{PortIDX: &idx17, Forward: "all"},
+				{PortIDX: &idx99, Forward: "customize", NATiveNetworkID: "net-media"},
+			},
+		}
+		tracked := []devicePortOverrideModel{
+			{PortIDX: types.Int64Value(15)},
+			{PortIDX: types.Int64Value(17)},
+		}
+
+		result := portOverridesFromAPI(dev, tracked)
+
+		require.Len(t, result, 2)
+		assert.Equal(t, int64(15), result[0].PortIDX.ValueInt64())
+		assert.Equal(t, "customize", result[0].Forward.ValueString())
+		assert.Equal(t, "net-infra", result[0].NativeNetworkID.ValueString())
+		assert.Equal(t, int64(17), result[1].PortIDX.ValueInt64())
+		assert.Equal(t, "all", result[1].Forward.ValueString())
+		assert.True(t, result[1].NativeNetworkID.IsNull())
+	})
+
+	t.Run("no tracked ports returns nil", func(t *testing.T) {
+		idx1 := int64(1)
+		dev := &unifi.Device{PortOverrides: []unifi.DevicePortOverrides{{PortIDX: &idx1}}}
+		result := portOverridesFromAPI(dev, nil)
+		assert.Nil(t, result)
+	})
+
+	t.Run("non-nil empty tracked returns non-nil empty slice, not nil", func(t *testing.T) {
+		// Regression test for Finding 3: port_overrides = [] in config must
+		// produce a non-nil empty state value, not null, or Terraform reports
+		// "Provider produced inconsistent result after apply."
+		idx1 := int64(1)
+		dev := &unifi.Device{PortOverrides: []unifi.DevicePortOverrides{{PortIDX: &idx1}}}
+		result := portOverridesFromAPI(dev, []devicePortOverrideModel{})
+		assert.NotNil(t, result)
+		assert.Equal(t, []devicePortOverrideModel{}, result)
+	})
+
+	t.Run("tracked port missing from live device is dropped", func(t *testing.T) {
+		dev := &unifi.Device{PortOverrides: []unifi.DevicePortOverrides{}}
+		tracked := []devicePortOverrideModel{{PortIDX: types.Int64Value(5)}}
+		result := portOverridesFromAPI(dev, tracked)
+		assert.Empty(t, result)
+	})
+
+	t.Run("excluded_network_ids round-trips", func(t *testing.T) {
+		idx18 := int64(18)
+		dev := &unifi.Device{
+			PortOverrides: []unifi.DevicePortOverrides{
+				{PortIDX: &idx18, ExcludedNetworkIDs: []string{"net-default", "net-work"}},
+			},
+		}
+		tracked := []devicePortOverrideModel{{PortIDX: types.Int64Value(18)}}
+		result := portOverridesFromAPI(dev, tracked)
+		require.Len(t, result, 1)
+		var ids []string
+		result[0].ExcludedNetworkIDs.ElementsAs(context.Background(), &ids, false)
+		assert.Equal(t, []string{"net-default", "net-work"}, ids)
+	})
+}
+
 // ---------------------------------------------------------------------------
 // Radio settings acceptance tests
 // ---------------------------------------------------------------------------
@@ -1603,6 +1675,272 @@ resource "terrifi_device" "test" {
 }
 `,
 				ExpectError: regexp.MustCompile(`value must be between`),
+			},
+		},
+	})
+}
+
+func TestPreserveNullPortOverrides(t *testing.T) {
+	t.Run("nulls fields not set in plan, keeps configured ones", func(t *testing.T) {
+		planned := []devicePortOverrideModel{
+			{
+				PortIDX:            types.Int64Value(15),
+				Forward:            types.StringValue("customize"),
+				NativeNetworkID:    types.StringNull(),
+				PoeMode:            types.StringValue("auto"),
+				ExcludedNetworkIDs: types.ListNull(types.StringType),
+			},
+		}
+		result := []devicePortOverrideModel{
+			{
+				PortIDX:            types.Int64Value(15),
+				Forward:            types.StringValue("customize"),
+				NativeNetworkID:    types.StringValue("net-infra"), // API-filled, not planned
+				PoeMode:            types.StringValue("auto"),
+				ExcludedNetworkIDs: types.ListValueMust(types.StringType, []attr.Value{types.StringValue("net-default")}),
+			},
+		}
+
+		preserveNullPortOverrides(planned, result)
+
+		assert.Equal(t, "customize", result[0].Forward.ValueString())
+		assert.True(t, result[0].NativeNetworkID.IsNull(), "unplanned field should be nulled")
+		assert.Equal(t, "auto", result[0].PoeMode.ValueString())
+		assert.True(t, result[0].ExcludedNetworkIDs.IsNull(), "unplanned list field should be nulled")
+	})
+
+	t.Run("port not present in planned is left untouched", func(t *testing.T) {
+		result := []devicePortOverrideModel{
+			{PortIDX: types.Int64Value(20), Forward: types.StringValue("all")},
+		}
+		preserveNullPortOverrides(nil, result)
+		assert.Equal(t, "all", result[0].Forward.ValueString())
+	})
+
+	t.Run("explicit empty excluded_network_ids in plan produces non-null empty result", func(t *testing.T) {
+		// Regression test for Finding 4: excluded_network_ids = [] in config
+		// (a legitimate "exclude nothing" declaration) must not be clobbered
+		// into null by whatever the live API happened to return.
+		planned := []devicePortOverrideModel{
+			{
+				PortIDX:            types.Int64Value(15),
+				ExcludedNetworkIDs: types.ListValueMust(types.StringType, []attr.Value{}),
+			},
+		}
+		result := []devicePortOverrideModel{
+			{
+				PortIDX: types.Int64Value(15),
+				ExcludedNetworkIDs: types.ListValueMust(types.StringType, []attr.Value{
+					types.StringValue("net-default"),
+				}),
+			},
+		}
+
+		preserveNullPortOverrides(planned, result)
+
+		assert.False(t, result[0].ExcludedNetworkIDs.IsNull(), "explicit empty list in plan must not become null")
+		assert.Empty(t, result[0].ExcludedNetworkIDs.Elements())
+	})
+}
+
+func TestAccDeviceResource_validationDuplicatePortIdx(t *testing.T) {
+	if os.Getenv("TF_ACC") == "" {
+		t.Skip("TF_ACC not set")
+	}
+	preCheck(t)
+	requireAdoptedDevice(t)
+	dev := findFirstAdoptedDevice(t)
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: fmt.Sprintf(`
+resource "terrifi_device" "test" {
+  mac = %q
+
+  port_overrides = [
+    { port_idx = 5, poe_mode = "auto" },
+    { port_idx = 5, poe_mode = "off" },
+  ]
+}
+`, dev.MAC),
+				ExpectError: regexp.MustCompile(`(?i)duplicate.*port_idx`),
+			},
+		},
+	})
+}
+
+// TestAccDeviceResource_portOverrides exercises the full CRUD lifecycle for
+// port_overrides: declaring a port, changing a field, and removing
+// port_overrides entirely to stop managing the port.
+func TestAccDeviceResource_portOverrides(t *testing.T) {
+	if os.Getenv("TF_ACC") == "" {
+		t.Skip("TF_ACC not set")
+	}
+	preCheck(t)
+	sw := findFirstAdoptedSwitchWithPorts(t)
+	if sw == nil {
+		t.Skip("no adopted device with port_overrides found on controller")
+	}
+	idx := *sw.PortOverrides[0].PortIDX
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			// Create: declare one port with one field set.
+			{
+				Config: fmt.Sprintf(`
+resource "terrifi_device" "test" {
+  mac = %q
+
+  port_overrides = [
+    { port_idx = %d, poe_mode = "auto" },
+  ]
+}
+`, sw.MAC, idx),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("terrifi_device.test", "port_overrides.#", "1"),
+					resource.TestCheckResourceAttr("terrifi_device.test", "port_overrides.0.port_idx", fmt.Sprintf("%d", idx)),
+					resource.TestCheckResourceAttr("terrifi_device.test", "port_overrides.0.poe_mode", "auto"),
+					resource.TestCheckNoResourceAttr("terrifi_device.test", "port_overrides.0.forward"),
+				),
+			},
+			// Update: change the field value.
+			{
+				Config: fmt.Sprintf(`
+resource "terrifi_device" "test" {
+  mac = %q
+
+  port_overrides = [
+    { port_idx = %d, poe_mode = "off" },
+  ]
+}
+`, sw.MAC, idx),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("terrifi_device.test", "port_overrides.0.poe_mode", "off"),
+				),
+			},
+			// Remove port_overrides entirely: stops managing the port
+			// (does not reset it — see the "preserves unmanaged ports" test
+			// below for the untouched-port guarantee this relies on).
+			{
+				Config: fmt.Sprintf(`
+resource "terrifi_device" "test" {
+  mac = %q
+}
+`, sw.MAC),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckNoResourceAttr("terrifi_device.test", "port_overrides.#"),
+				),
+			},
+		},
+	})
+}
+
+// TestAccDeviceResource_portOverrides_preservesUnmanagedPorts proves the
+// write-side merge's core safety guarantee end-to-end: applying a config
+// that declares only one port must never change a different, undeclared
+// port's live configuration on the controller.
+func TestAccDeviceResource_portOverrides_preservesUnmanagedPorts(t *testing.T) {
+	if os.Getenv("TF_ACC") == "" {
+		t.Skip("TF_ACC not set")
+	}
+	preCheck(t)
+	sw := findFirstAdoptedSwitchWithPorts(t)
+	if sw == nil || len(sw.PortOverrides) < 2 {
+		t.Skip("need an adopted device with at least 2 port_overrides entries")
+	}
+	managedIdx := *sw.PortOverrides[0].PortIDX
+	untouchedIdx := *sw.PortOverrides[1].PortIDX
+	require.NotEqual(t, managedIdx, untouchedIdx, "fixture device must have two distinct port_idx entries")
+	client := testAccGetClient(t)
+	ctx := t.Context()
+
+	before, err := client.GetDeviceByMAC(ctx, "default", sw.MAC)
+	require.NoError(t, err)
+	var beforeUntouched *unifi.DevicePortOverrides
+	for i := range before.PortOverrides {
+		if before.PortOverrides[i].PortIDX != nil && *before.PortOverrides[i].PortIDX == untouchedIdx {
+			beforeUntouched = &before.PortOverrides[i]
+		}
+	}
+	require.NotNil(t, beforeUntouched, "untouched port must exist on the device before the test applies anything")
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: fmt.Sprintf(`
+resource "terrifi_device" "test" {
+  mac = %q
+
+  port_overrides = [
+    { port_idx = %d, poe_mode = "auto" },
+  ]
+}
+`, sw.MAC, managedIdx),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("terrifi_device.test", "port_overrides.0.poe_mode", "auto"),
+					func(_ *terraform.State) error {
+						after, err := client.GetDeviceByMAC(ctx, "default", sw.MAC)
+						if err != nil {
+							return err
+						}
+						for i := range after.PortOverrides {
+							if after.PortOverrides[i].PortIDX == nil || *after.PortOverrides[i].PortIDX != untouchedIdx {
+								continue
+							}
+							if after.PortOverrides[i].Forward != beforeUntouched.Forward {
+								return fmt.Errorf("unmanaged port %d's forward changed: %q -> %q", untouchedIdx, beforeUntouched.Forward, after.PortOverrides[i].Forward)
+							}
+							if after.PortOverrides[i].PoeMode != beforeUntouched.PoeMode {
+								return fmt.Errorf("unmanaged port %d's poe_mode changed: %q -> %q", untouchedIdx, beforeUntouched.PoeMode, after.PortOverrides[i].PoeMode)
+							}
+							if after.PortOverrides[i].NATiveNetworkID != beforeUntouched.NATiveNetworkID {
+								return fmt.Errorf("unmanaged port %d's native_network_id changed: %q -> %q", untouchedIdx, beforeUntouched.NATiveNetworkID, after.PortOverrides[i].NATiveNetworkID)
+							}
+							return nil
+						}
+						return fmt.Errorf("port %d not found on device after apply", untouchedIdx)
+					},
+				),
+			},
+		},
+	})
+}
+
+// TestAccDeviceResource_portOverrides_import confirms the design decision
+// from the spec: importing a device starts with port_overrides unmanaged
+// (null/absent), regardless of what live port config exists.
+func TestAccDeviceResource_portOverrides_import(t *testing.T) {
+	if os.Getenv("TF_ACC") == "" {
+		t.Skip("TF_ACC not set")
+	}
+	preCheck(t)
+	sw := findFirstAdoptedSwitchWithPorts(t)
+	if sw == nil {
+		t.Skip("no adopted device with port_overrides found on controller")
+	}
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: fmt.Sprintf(`
+resource "terrifi_device" "test" {
+  mac = %q
+}
+`, sw.MAC),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckNoResourceAttr("terrifi_device.test", "port_overrides.#"),
+				),
+			},
+			{
+				ResourceName:      "terrifi_device.test",
+				ImportState:       true,
+				ImportStateVerify: true,
+				ImportStateId:     sw.MAC,
 			},
 		},
 	})

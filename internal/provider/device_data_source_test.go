@@ -209,6 +209,24 @@ func findFirstAdoptedAP(t *testing.T) *unifi.Device {
 	return nil
 }
 
+// findFirstAdoptedSwitchWithPorts returns the first adopted device that has
+// at least one PortOverrides entry, or nil if none exist. port_overrides
+// tests need a device with real ports to declare against.
+func findFirstAdoptedSwitchWithPorts(t *testing.T) *unifi.Device {
+	t.Helper()
+	client := testAccGetClient(t)
+	devices, err := client.ApiClient.ListDevice(t.Context(), "default")
+	if err != nil {
+		t.Fatalf("failed to list devices: %s", err)
+	}
+	for i := range devices {
+		if devices[i].Adopted && len(devices[i].PortOverrides) > 0 {
+			return &devices[i]
+		}
+	}
+	return nil
+}
+
 // requireAdoptedAP skips the test if no adopted AP exists on the controller.
 func requireAdoptedAP(t *testing.T) {
 	t.Helper()

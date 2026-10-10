@@ -873,6 +873,59 @@ func TestClientGroupBlocks(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// DeviceBlocks
+// ---------------------------------------------------------------------------
+
+func TestDeviceBlocks_portOverrides(t *testing.T) {
+	idx15 := int64(15)
+	idx17 := int64(17)
+	devices := []unifi.Device{
+		{
+			ID:      "dev-1",
+			MAC:     "aa:bb:cc:dd:ee:ff",
+			Name:    "core-switch",
+			Adopted: true,
+			PortOverrides: []unifi.DevicePortOverrides{
+				{
+					PortIDX:         &idx15,
+					Forward:         "customize",
+					NATiveNetworkID: "net-infra",
+					TaggedVLANMgmt:  "auto",
+					PoeMode:         "auto",
+				},
+				{
+					PortIDX: &idx17,
+					Forward: "all",
+				},
+			},
+		},
+	}
+
+	blocks := DeviceBlocks(devices)
+	require.Len(t, blocks, 1)
+
+	attrMap := attrMapFromBlock(blocks[0])
+	portOverrides, ok := attrMap["port_overrides"]
+	require.True(t, ok, "port_overrides attribute should be present")
+	assert.Contains(t, portOverrides, `port_idx = 15`)
+	assert.Contains(t, portOverrides, `native_network_id = "net-infra"`)
+	assert.Contains(t, portOverrides, `tagged_vlan_mgmt = "auto"`)
+	assert.Contains(t, portOverrides, `port_idx = 17`)
+	assert.Contains(t, portOverrides, `forward  = "all"`)
+}
+
+func TestDeviceBlocks_noPortOverrides(t *testing.T) {
+	devices := []unifi.Device{
+		{ID: "dev-2", MAC: "11:22:33:44:55:66", Adopted: true},
+	}
+	blocks := DeviceBlocks(devices)
+	require.Len(t, blocks, 1)
+	attrMap := attrMapFromBlock(blocks[0])
+	_, ok := attrMap["port_overrides"]
+	assert.False(t, ok, "port_overrides should be omitted when device has no overrides")
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

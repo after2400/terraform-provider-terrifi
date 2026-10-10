@@ -106,6 +106,36 @@ resource "terrifi_device" "core_switch" {
 }
 ```
 
+### Per-port switch configuration
+
+```terraform
+resource "terrifi_device" "core_switch" {
+  mac  = "aa:bb:cc:dd:ee:ff"
+  name = "core-switch"
+
+  port_overrides = [
+    {
+      port_idx          = 9
+      forward           = "customize"
+      native_network_id = terrifi_network.infrastructure.id
+      poe_mode          = "auto"
+    },
+    {
+      port_idx = 15
+      forward  = "customize"
+      native_network_id = terrifi_network.infrastructure.id
+      poe_mode = "off"
+    },
+  ]
+}
+```
+
+Only ports listed in `port_overrides` are managed — every other port on the device is left completely untouched, both on create and on update. Fields omitted within a declared port entry are also left unchanged on the controller. Removing a port's entry from this list stops managing it; it does not reset the port's configuration.
+
+Declaring a `port_idx` that has no existing override on the controller (for example, a factory-default port that has never been customized) creates a fresh override entry rather than erroring.
+
+Use `terrifi generate-imports terrifi_device` to get a starting `port_overrides` block populated from a device's current live configuration — see [CLI](../index.md#cli). Its output includes every port that already has a live override entry; trim the generated block down to only the ports you actually intend to manage before applying, since every port left in the block comes under Terraform management.
+
 ### Using with device data source
 
 ```terraform
@@ -144,6 +174,7 @@ resource "terrifi_device" "ap" {
 - `radio_6` (Attributes) — Settings for the 6 GHz radio (UniFi `6e` radio) on an access point. See [nested schema for radio blocks](#nested-schema-for-radio-blocks).
 - `site` (String) — The site the device belongs to. Defaults to the provider site. Changing this forces a new resource.
 - `config_network` (Block) — Management network configuration. Omit to leave the device's current configuration untouched. See [below](#config_network).
+- `port_overrides` (Attributes List) — Per-port switch configuration. Only ports listed here are managed. See [nested schema for port_overrides](#nested-schema-for-port_overrides).
 
 ### config_network
 
@@ -164,6 +195,16 @@ All fields are optional. Omitting the block entirely leaves the radio's current 
 - `transmit_power` (String) — Transmit power in dBm. Only used when `transmit_power_mode` is `custom`.
 - `min_rssi_enabled` (Boolean) — Whether the minimum RSSI client association threshold is enabled.
 - `min_rssi` (Number) — Minimum RSSI threshold for client association (dBm, -90 to -67).
+
+### Nested schema for port_overrides
+
+- `port_idx` (Number, Required) — The physical port number this override applies to (1-56).
+- `forward` (String) — Forwarding mode: `all`, `native`, `customize`, or `disabled`.
+- `op_mode` (String) — Port operating mode: `switch`, `mirror`, or `aggregate`.
+- `native_network_id` (String) — The ID of the network to use as this port's native/untagged VLAN.
+- `tagged_vlan_mgmt` (String) — Tagged VLAN management mode: `auto`, `block_all`, or `custom`.
+- `excluded_network_ids` (List of String) — Network IDs excluded from this port's tagged VLANs. Only meaningful when `tagged_vlan_mgmt = "custom"`.
+- `poe_mode` (String) — PoE mode: `auto`, `pasv24`, `passthrough`, or `off`.
 
 ### Read-Only
 
@@ -193,3 +234,5 @@ You can also use the [Terrifi CLI](../index.md#cli) to generate import blocks fo
 ```shell
 terrifi generate-imports terrifi_device
 ```
+
+`port_overrides` starts unmanaged (null) after `terraform import` — the provider has no way to infer which ports you intend to manage from a live device alone.
