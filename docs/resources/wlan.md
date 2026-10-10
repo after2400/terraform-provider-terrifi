@@ -96,6 +96,10 @@ resource "terrifi_wlan" "maintenance" {
 - `wpa3_transition` (Boolean) — Whether to enable WPA3 transition mode (WPA2/WPA3 mixed). Defaults to `false`.
 - `application` (String) — The application type. Must be `standard`, `hotspot`, or `iot`. `hotspot` enables guest behavior (captive portal); `iot` enables IoT-optimized behavior. Defaults to `standard`.
 - `optimize_iot_connectivity` (Boolean) — Enable IoT-specific radio optimizations that improve connection reliability for IoT devices. Only meaningful when `application = "iot"`. Defaults to `false`.
+- `fast_roaming_enabled` (Boolean) — Enable fast roaming (802.11r), which speeds up handoff between access points. Some older clients fail to join an 802.11r network, so test before enabling. Omit to leave the controller's current value unchanged; a new WLAN starts with `false`.
+- `bss_transition_enabled` (Boolean) — Enable BSS transition (802.11v), which lets access points suggest a better AP to clients. Omit to leave the controller's current value unchanged; a new WLAN starts with `false`.
+- `uapsd_enabled` (Boolean) — Enable U-APSD (WMM power save), which lets clients sleep between transmissions. Omit to leave the controller's current value unchanged; a new WLAN starts with `false`.
+- `l2_isolation_enabled` (Boolean) — Enable Client Device Isolation (`l2_isolation`): wireless clients on this SSID cannot reach each other. This is a different setting from the network-level `network_isolation_enabled` on `terrifi_network`. Omit to leave the controller's current value unchanged; a new WLAN starts with `false`.
 
 ~> **Note:** The UniFi controller coerces iot WLANs (especially with `optimize_iot_connectivity = true`) to the 2.4 GHz band. Set `wifi_band = "2g"` explicitly when using `application = "iot"` to avoid inconsistent-plan errors.
 - `site` (String) — The site to associate the WLAN with. Defaults to the provider site. Changing this forces a new resource.

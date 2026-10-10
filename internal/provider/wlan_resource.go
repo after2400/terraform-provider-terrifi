@@ -10,6 +10,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -46,6 +47,10 @@ type wlanResourceModel struct {
 	WPA3Transition          types.Bool   `tfsdk:"wpa3_transition"`
 	Application             types.String `tfsdk:"application"`
 	OptimizeIoTConnectivity types.Bool   `tfsdk:"optimize_iot_connectivity"`
+	FastRoamingEnabled      types.Bool   `tfsdk:"fast_roaming_enabled"`
+	BSSTransitionEnabled    types.Bool   `tfsdk:"bss_transition_enabled"`
+	UapsdEnabled            types.Bool   `tfsdk:"uapsd_enabled"`
+	L2IsolationEnabled      types.Bool   `tfsdk:"l2_isolation_enabled"`
 }
 
 func (r *wlanResource) Metadata(
@@ -181,6 +186,46 @@ func (r *wlanResource) Schema(
 				Optional: true,
 				Computed: true,
 				Default:  booldefault.StaticBool(false),
+			},
+
+			"fast_roaming_enabled": schema.BoolAttribute{
+				MarkdownDescription: "Enable fast roaming (802.11r), which speeds up handoff between access points. Some older clients fail to join an 802.11r network, so test before enabling. " +
+					"Omit to leave the controller's current value unchanged; a new WLAN starts with `false`.",
+				Optional: true,
+				Computed: true,
+				PlanModifiers: []planmodifier.Bool{
+					boolplanmodifier.UseStateForUnknown(),
+				},
+			},
+
+			"bss_transition_enabled": schema.BoolAttribute{
+				MarkdownDescription: "Enable BSS transition (802.11v), which lets access points suggest a better AP to clients. " +
+					"Omit to leave the controller's current value unchanged; a new WLAN starts with `false`.",
+				Optional: true,
+				Computed: true,
+				PlanModifiers: []planmodifier.Bool{
+					boolplanmodifier.UseStateForUnknown(),
+				},
+			},
+
+			"uapsd_enabled": schema.BoolAttribute{
+				MarkdownDescription: "Enable U-APSD (WMM power save), which lets clients sleep between transmissions. " +
+					"Omit to leave the controller's current value unchanged; a new WLAN starts with `false`.",
+				Optional: true,
+				Computed: true,
+				PlanModifiers: []planmodifier.Bool{
+					boolplanmodifier.UseStateForUnknown(),
+				},
+			},
+
+			"l2_isolation_enabled": schema.BoolAttribute{
+				MarkdownDescription: "Enable Client Device Isolation (`l2_isolation`): wireless clients on this SSID cannot reach each other. This is a different setting from the network-level `network_isolation_enabled` on `terrifi_network`. " +
+					"Omit to leave the controller's current value unchanged; a new WLAN starts with `false`.",
+				Optional: true,
+				Computed: true,
+				PlanModifiers: []planmodifier.Bool{
+					boolplanmodifier.UseStateForUnknown(),
+				},
 			},
 		},
 	}
@@ -444,6 +489,18 @@ func (r *wlanResource) applyPlanToState(plan, state *wlanResourceModel) {
 	if !plan.OptimizeIoTConnectivity.IsNull() && !plan.OptimizeIoTConnectivity.IsUnknown() {
 		state.OptimizeIoTConnectivity = plan.OptimizeIoTConnectivity
 	}
+	if !plan.FastRoamingEnabled.IsNull() && !plan.FastRoamingEnabled.IsUnknown() {
+		state.FastRoamingEnabled = plan.FastRoamingEnabled
+	}
+	if !plan.BSSTransitionEnabled.IsNull() && !plan.BSSTransitionEnabled.IsUnknown() {
+		state.BSSTransitionEnabled = plan.BSSTransitionEnabled
+	}
+	if !plan.UapsdEnabled.IsNull() && !plan.UapsdEnabled.IsUnknown() {
+		state.UapsdEnabled = plan.UapsdEnabled
+	}
+	if !plan.L2IsolationEnabled.IsNull() && !plan.L2IsolationEnabled.IsUnknown() {
+		state.L2IsolationEnabled = plan.L2IsolationEnabled
+	}
 }
 
 func (r *wlanResource) modelToAPI(m *wlanResourceModel) *unifi.WLAN {
@@ -499,6 +556,19 @@ func (r *wlanResource) modelToAPI(m *wlanResourceModel) *unifi.WLAN {
 		wlan.OptimizeIotWifiConnectivity = m.OptimizeIoTConnectivity.ValueBool()
 	}
 
+	if !m.FastRoamingEnabled.IsNull() && !m.FastRoamingEnabled.IsUnknown() {
+		wlan.FastRoamingEnabled = m.FastRoamingEnabled.ValueBool()
+	}
+	if !m.BSSTransitionEnabled.IsNull() && !m.BSSTransitionEnabled.IsUnknown() {
+		wlan.BssTransition = m.BSSTransitionEnabled.ValueBool()
+	}
+	if !m.UapsdEnabled.IsNull() && !m.UapsdEnabled.IsUnknown() {
+		wlan.UapsdEnabled = m.UapsdEnabled.ValueBool()
+	}
+	if !m.L2IsolationEnabled.IsNull() && !m.L2IsolationEnabled.IsUnknown() {
+		wlan.L2Isolation = m.L2IsolationEnabled.ValueBool()
+	}
+
 	return wlan
 }
 
@@ -547,4 +617,8 @@ func (r *wlanResource) apiToModel(wlan *unifi.WLAN, m *wlanResourceModel, site s
 	}
 
 	m.OptimizeIoTConnectivity = types.BoolValue(wlan.OptimizeIotWifiConnectivity)
+	m.FastRoamingEnabled = types.BoolValue(wlan.FastRoamingEnabled)
+	m.BSSTransitionEnabled = types.BoolValue(wlan.BssTransition)
+	m.UapsdEnabled = types.BoolValue(wlan.UapsdEnabled)
+	m.L2IsolationEnabled = types.BoolValue(wlan.L2Isolation)
 }
