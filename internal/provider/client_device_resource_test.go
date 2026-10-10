@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
@@ -1955,4 +1956,30 @@ resource "terrifi_client_device" "test" {
 			},
 		},
 	})
+}
+
+func TestMACLowercasePlanModifier(t *testing.T) {
+	tests := []struct {
+		name string
+		in   types.String
+		want types.String
+	}{
+		{"uppercase", types.StringValue("AA:BB:CC:DD:EE:FF"), types.StringValue("aa:bb:cc:dd:ee:ff")},
+		{"mixed case", types.StringValue("Aa:bB:cC:Dd:eE:fF"), types.StringValue("aa:bb:cc:dd:ee:ff")},
+		{"already lowercase", types.StringValue("aa:bb:cc:dd:ee:ff"), types.StringValue("aa:bb:cc:dd:ee:ff")},
+		{"null is left alone", types.StringNull(), types.StringNull()},
+		{"unknown is left alone", types.StringUnknown(), types.StringUnknown()},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := planmodifier.StringRequest{PlanValue: tt.in}
+			resp := &planmodifier.StringResponse{PlanValue: tt.in}
+
+			macLowercasePlanModifier{}.PlanModifyString(context.Background(), req, resp)
+
+			assert.False(t, resp.Diagnostics.HasError())
+			assert.True(t, tt.want.Equal(resp.PlanValue), "got %s, want %s", resp.PlanValue, tt.want)
+		})
+	}
 }

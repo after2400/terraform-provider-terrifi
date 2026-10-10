@@ -88,9 +88,15 @@ func (r *clientDeviceResource) Schema(
 			},
 
 			"mac": schema.StringAttribute{
-				MarkdownDescription: "The MAC address of the client device (e.g. `aa:bb:cc:dd:ee:ff`).",
+				MarkdownDescription: "The MAC address of the client device (e.g. `aa:bb:cc:dd:ee:ff`). Normalized to lowercase to match what the UniFi API always returns.",
 				Required:            true,
 				PlanModifiers: []planmodifier.String{
+					// Must run before RequiresReplace so a case-only config
+					// edit isn't mistaken for a real MAC change, and so the
+					// planned value already matches the lowercase form the
+					// API always echoes back (avoiding a provider
+					// consistency error on create/update).
+					macLowercasePlanModifier{},
 					stringplanmodifier.RequiresReplace(),
 				},
 				Validators: []validator.String{
@@ -656,4 +662,24 @@ func (r *clientDeviceResource) apiToModel(c *unifi.Client, m *clientDeviceResour
 	} else {
 		m.Blocked = types.BoolValue(false)
 	}
+}
+
+// macLowercasePlanModifier normalizes a MAC address to lowercase at plan
+// time so the planned value always matches what the UniFi API returns,
+// avoiding a "Provider produced inconsistent result after apply" error.
+type macLowercasePlanModifier struct{}
+
+func (m macLowercasePlanModifier) Description(_ context.Context) string {
+	return "Normalizes the MAC address to lowercase."
+}
+
+func (m macLowercasePlanModifier) MarkdownDescription(ctx context.Context) string {
+	return m.Description(ctx)
+}
+
+func (m macLowercasePlanModifier) PlanModifyString(_ context.Context, req planmodifier.StringRequest, resp *planmodifier.StringResponse) {
+	if req.PlanValue.IsNull() || req.PlanValue.IsUnknown() {
+		return
+	}
+	resp.PlanValue = types.StringValue(strings.ToLower(req.PlanValue.ValueString()))
 }
