@@ -55,6 +55,10 @@ type deviceUpdatePayload struct {
 	SnmpLocation               string                      `json:"snmp_location,omitempty"`
 	Volume                     *int64                      `json:"volume,omitempty"`
 	ConfigNetwork              *deviceConfigNetworkPayload `json:"config_network,omitempty"`
+	// MgmtNetworkID is the Network Override: the network the device's
+	// management traffic uses. omitempty means an unset attribute leaves the
+	// controller's value alone; it cannot be used to clear the override.
+	MgmtNetworkID string `json:"mgmt_network_id,omitempty"`
 	RadioTable                 []unifi.DeviceRadioTable    `json:"radio_table,omitempty"`
 	// PortOverrides is sent as raw JSON blobs rather than the typed
 	// unifi.DevicePortOverrides struct. See fetchDevicePortOverridesRaw for
@@ -186,6 +190,10 @@ func (c *Client) UpdateDevice(ctx context.Context, site string, id string, m *de
 			DNS1:    m.ConfigNetwork.DNS1.ValueString(),
 			DNS2:    m.ConfigNetwork.DNS2.ValueString(),
 		}
+	}
+
+	if !m.MgmtNetworkID.IsNull() && !m.MgmtNetworkID.IsUnknown() {
+		payload.MgmtNetworkID = m.MgmtNetworkID.ValueString()
 	}
 
 	plannedByRadio := map[string]*deviceRadioSettingsModel{}

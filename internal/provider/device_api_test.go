@@ -335,3 +335,39 @@ func TestUpdateDevicePayload_portOverrides_appendsUnmatchedPortIdx(t *testing.T)
 	assert.Equal(t, "off", merged[1]["poe_mode"])
 	assert.NotContains(t, merged[1], "forward", "new entry only contains modeled+set fields")
 }
+
+func TestDeviceUpdatePayload_mgmtNetworkID(t *testing.T) {
+	// Verifies the Network Override is sent when set and omitted when not, so
+	// a config that doesn't declare it leaves the controller's value alone.
+	set, err := json.Marshal(deviceUpdatePayload{Name: "sw", MgmtNetworkID: "net-96"})
+	require.NoError(t, err)
+	assert.Contains(t, string(set), `"mgmt_network_id":"net-96"`)
+
+	unset, err := json.Marshal(deviceUpdatePayload{Name: "sw"})
+	require.NoError(t, err)
+	assert.NotContains(t, string(unset), "mgmt_network_id")
+}
+
+func TestDeviceMgmtNetworkID_readAndPreserveNull(t *testing.T) {
+	r := &deviceResource{}
+
+	var read deviceResourceModel
+	r.apiToModel(&unifi.Device{MAC: "aa:bb:cc:dd:ee:ff", MgmtNetworkID: "net-96"}, &read, "default")
+	assert.Equal(t, types.StringValue("net-96"), read.MgmtNetworkID)
+
+	var unsetOnController deviceResourceModel
+	r.apiToModel(&unifi.Device{MAC: "aa:bb:cc:dd:ee:ff"}, &unsetOnController, "default")
+	assert.True(t, unsetOnController.MgmtNetworkID.IsNull(), "empty override reads back as null")
+
+	// A config that doesn't declare the attribute must not see the controller's
+	// value as drift.
+	plan := deviceResourceModel{MgmtNetworkID: types.StringNull()}
+	r.preserveNullOptionals(&plan, &read)
+	assert.True(t, read.MgmtNetworkID.IsNull())
+
+	declared := deviceResourceModel{MgmtNetworkID: types.StringValue("net-96")}
+	var live deviceResourceModel
+	r.apiToModel(&unifi.Device{MAC: "aa:bb:cc:dd:ee:ff", MgmtNetworkID: "net-96"}, &live, "default")
+	r.preserveNullOptionals(&declared, &live)
+	assert.Equal(t, types.StringValue("net-96"), live.MgmtNetworkID)
+}

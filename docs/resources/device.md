@@ -169,6 +169,7 @@ resource "terrifi_device" "ap" {
 - `snmp_contact` (String) — [SNMP](https://en.wikipedia.org/wiki/Simple_Network_Management_Protocol) contact string (max 255 characters). Identifies who is responsible for the device; read by network monitoring tools like Nagios, PRTG, or LibreNMS.
 - `snmp_location` (String) — [SNMP](https://en.wikipedia.org/wiki/Simple_Network_Management_Protocol) location string (max 255 characters). Describes where the device is physically located; read by network monitoring tools.
 - `volume` (Number) — Speaker volume (0–100). Only applicable to devices with speakers.
+- `mgmt_network_id` (String) — ID of the network the device's management traffic uses (the Network Override in the UniFi UI), normally a `terrifi_network.<name>.id`. Omit to leave the device's current setting unchanged. Removing the attribute later does not clear the override on the controller; clear it in the UI.
 - `radio_24` (Attributes) — Settings for the 2.4 GHz radio (UniFi `ng` radio) on an access point. See [nested schema for radio blocks](#nested-schema-for-radio-blocks).
 - `radio_5` (Attributes) — Settings for the 5 GHz radio (UniFi `na` radio) on an access point. See [nested schema for radio blocks](#nested-schema-for-radio-blocks).
 - `radio_6` (Attributes) — Settings for the 6 GHz radio (UniFi `6e` radio) on an access point. See [nested schema for radio blocks](#nested-schema-for-radio-blocks).
