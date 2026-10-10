@@ -21,6 +21,7 @@ var validResourceTypes = []string{
 	"terrifi_firewall_policy",
 	"terrifi_firewall_policy_order",
 	"terrifi_network",
+	"terrifi_port_forward",
 	"terrifi_wlan",
 }
 
@@ -98,6 +99,13 @@ func runGenerateImports(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("listing DNS records: %w", err)
 		}
 		blocks = generate.DNSRecordBlocks(records)
+
+	case "terrifi_port_forward":
+		forwards, err := client.ListPortForwards(ctx, site)
+		if err != nil {
+			return fmt.Errorf("listing port forwards: %w", err)
+		}
+		blocks = generate.PortForwardBlocks(forwards)
 
 	case "terrifi_firewall_group":
 		groups, err := client.ListFirewallGroup(ctx, site)

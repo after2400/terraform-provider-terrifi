@@ -944,3 +944,29 @@ func nestedAttrMap(nb NestedBlock) map[string]string {
 	}
 	return m
 }
+
+func TestPortForwardBlocks(t *testing.T) {
+	blocks := PortForwardBlocks([]unifi.PortForward{
+		{ID: "a1", Name: "Game Console", Enabled: true, Proto: "tcp_udp", PfwdInterface: "wan",
+			DestinationIP: "any", DstPort: "3074", Fwd: "10.0.0.5", FwdPort: "3074"},
+		{ID: "b2", Name: "Remote Play", Enabled: false, Proto: "udp", PfwdInterface: "wan2",
+			DestinationIP: "203.0.113.9", DstPort: "9002", Fwd: "10.0.0.5", FwdPort: "9002",
+			SrcLimitingEnabled: true, SrcLimitingType: "ip", Src: "203.0.113.0/24", Log: true},
+	})
+	require.Len(t, blocks, 2)
+
+	assert.Equal(t, "terrifi_port_forward", blocks[0].ResourceType)
+	assert.Equal(t, "game_console", blocks[0].ResourceName)
+	assert.Equal(t, "a1", blocks[0].ImportID)
+	keys := func(b ResourceBlock) []string {
+		var k []string
+		for _, a := range b.Attributes {
+			k = append(k, a.Key)
+		}
+		return k
+	}
+	assert.Equal(t, []string{"name", "destination_port", "forward_ip", "forward_port"}, keys(blocks[0]),
+		"defaults are omitted")
+	assert.ElementsMatch(t, []string{"name", "destination_port", "forward_ip", "forward_port",
+		"protocol", "interface", "destination_ip", "enabled", "log", "source_ip"}, keys(blocks[1]))
+}
