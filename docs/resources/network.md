@@ -57,6 +57,8 @@ resource "terrifi_network" "cameras" {
 - `dhcp_lease` (Number) — The DHCP lease time in seconds. Defaults to `86400` (24 hours).
 - `dhcp_dns` (List of String) — List of DNS servers for DHCP clients. Maximum 4 servers.
 - `internet_access_enabled` (Boolean) — Whether internet access is enabled on this network. Defaults to `true`.
+- `mdns_enabled` (Boolean) — Whether multicast DNS (mDNS) reflection is enabled on this network (Settings → Networks → Multicast DNS in the UniFi UI), needed for AirPlay-style discovery across networks. Only valid for `corporate` networks. Omit to leave the controller's current value unchanged; a new network starts with `false`.
+- `network_isolation_enabled` (Boolean) — Whether client device isolation is enabled on this network, so clients cannot reach each other. Only valid for `corporate` networks. Omit to leave the controller's current value unchanged; a new network starts with `false`.
 - `site` (String) — The site to associate the network with. Defaults to the provider site. Changing this forces a new resource.
 
 ### Read-Only
