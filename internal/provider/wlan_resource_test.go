@@ -438,6 +438,62 @@ func TestWLANApplyPlanToState(t *testing.T) {
 	})
 }
 
+func TestWLANRoamingAndIsolation(t *testing.T) {
+	r := &wlanResource{}
+
+	t.Run("modelToAPI sends the four flags", func(t *testing.T) {
+		wlan := r.modelToAPI(&wlanResourceModel{
+			Name:                 types.StringValue("w"),
+			NetworkID:            types.StringValue("n"),
+			FastRoamingEnabled:   types.BoolValue(true),
+			BSSTransitionEnabled: types.BoolValue(true),
+			UapsdEnabled:         types.BoolValue(true),
+			L2IsolationEnabled:   types.BoolValue(true),
+		})
+		assert.True(t, wlan.FastRoamingEnabled)
+		assert.True(t, wlan.BssTransition)
+		assert.True(t, wlan.UapsdEnabled)
+		assert.True(t, wlan.L2Isolation)
+	})
+
+	t.Run("modelToAPI leaves flags false when null or unknown", func(t *testing.T) {
+		wlan := r.modelToAPI(&wlanResourceModel{
+			Name:               types.StringValue("w"),
+			NetworkID:          types.StringValue("n"),
+			FastRoamingEnabled: types.BoolUnknown(),
+			L2IsolationEnabled: types.BoolNull(),
+		})
+		assert.False(t, wlan.FastRoamingEnabled)
+		assert.False(t, wlan.L2Isolation)
+	})
+
+	t.Run("apiToModel reads the four flags", func(t *testing.T) {
+		var model wlanResourceModel
+		r.apiToModel(&unifi.WLAN{
+			ID: "w1", Name: "w", NetworkID: "n",
+			FastRoamingEnabled: true, L2Isolation: true,
+		}, &model, "default")
+		assert.True(t, model.FastRoamingEnabled.ValueBool())
+		assert.False(t, model.BSSTransitionEnabled.ValueBool())
+		assert.False(t, model.UapsdEnabled.ValueBool())
+		assert.True(t, model.L2IsolationEnabled.ValueBool())
+	})
+
+	t.Run("applyPlanToState keeps the live value when the plan is unknown", func(t *testing.T) {
+		state := &wlanResourceModel{
+			L2IsolationEnabled: types.BoolValue(true),
+			UapsdEnabled:       types.BoolValue(true),
+		}
+		plan := &wlanResourceModel{
+			L2IsolationEnabled: types.BoolUnknown(),
+			UapsdEnabled:       types.BoolValue(false),
+		}
+		r.applyPlanToState(plan, state)
+		assert.True(t, state.L2IsolationEnabled.ValueBool(), "unknown plan must not clear the live setting")
+		assert.False(t, state.UapsdEnabled.ValueBool(), "explicit false is applied")
+	})
+}
+
 // ---------------------------------------------------------------------------
 // Acceptance tests
 // ---------------------------------------------------------------------------
@@ -1342,6 +1398,51 @@ resource "terrifi_wlan" "test" {
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr("terrifi_wlan.test", "wpa3_support", "false"),
 					resource.TestCheckResourceAttr("terrifi_wlan.test", "wpa3_transition", "false"),
+				),
+			},
+		},
+	})
+}
+
+func TestAccWLAN_roamingAndIsolation(t *testing.T) {
+	name := fmt.Sprintf("tfacc-roam-%s", randomSuffix())
+	cfg := func(roam, iso bool) string {
+		return fmt.Sprintf(`
+resource "terrifi_network" "test" {
+  name         = %q
+  purpose      = "corporate"
+  vlan_id      = 52
+  subnet       = "192.168.52.1/24"
+  dhcp_enabled = true
+  dhcp_start   = "192.168.52.6"
+  dhcp_stop    = "192.168.52.254"
+}
+
+resource "terrifi_wlan" "test" {
+  name                 = %q
+  network_id           = terrifi_network.test.id
+  passphrase           = "tfacc-passphrase-1"
+  fast_roaming_enabled = %t
+  l2_isolation_enabled = %t
+}
+`, name, name, roam, iso)
+	}
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { preCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: cfg(true, false),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("terrifi_wlan.test", "fast_roaming_enabled", "true"),
+					resource.TestCheckResourceAttr("terrifi_wlan.test", "l2_isolation_enabled", "false"),
+				),
+			},
+			{
+				Config: cfg(false, true),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("terrifi_wlan.test", "fast_roaming_enabled", "false"),
+					resource.TestCheckResourceAttr("terrifi_wlan.test", "l2_isolation_enabled", "true"),
 				),
 			},
 		},
