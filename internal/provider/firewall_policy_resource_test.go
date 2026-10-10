@@ -2541,6 +2541,54 @@ resource "terrifi_firewall_policy" "test" {
 	})
 }
 
+// TestAccFirewallPolicy_portIdempotent is a regression test for a bug where
+// port_matching_type used a static schema Default("ANY"), which the
+// framework applies before it marks null-in-config computed attributes
+// unknown — so the default permanently overrode the real derived value
+// (SPECIFIC, from resolvePortMatchingType) on every subsequent plan, and
+// applying that plan would fail with "Provider produced inconsistent result
+// after apply". TestAccFirewallPolicy_idempotent doesn't catch this because
+// it never sets a port. The second PlanOnly step here requires an empty
+// diff; it fails if this regresses.
+func TestAccFirewallPolicy_portIdempotent(t *testing.T) {
+	zone1Name := fmt.Sprintf("tfacc-pol-pid-z1-%s", randomSuffix())
+	zone2Name := fmt.Sprintf("tfacc-pol-pid-z2-%s", randomSuffix())
+	policyName := fmt.Sprintf("tfacc-pol-pid-%s", randomSuffix())
+
+	config := testAccFirewallPolicyZonesConfig(zone1Name, zone2Name) + fmt.Sprintf(`
+resource "terrifi_firewall_policy" "test" {
+  name   = %q
+  action = "ALLOW"
+
+  source {
+    zone_id = terrifi_firewall_zone.zone1.id
+  }
+
+  destination {
+    zone_id = terrifi_firewall_zone.zone2.id
+    port    = 443
+  }
+}
+`, policyName)
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { preCheck(t); requireHardware(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: config,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("terrifi_firewall_policy.test", "destination.port_matching_type", "SPECIFIC"),
+				),
+			},
+			{
+				Config:   config,
+				PlanOnly: true,
+			},
+		},
+	})
+}
+
 func TestAccFirewallPolicy_indexComputed(t *testing.T) {
 	zone1Name := fmt.Sprintf("tfacc-pol-idx-z1-%s", randomSuffix())
 	zone2Name := fmt.Sprintf("tfacc-pol-idx-z2-%s", randomSuffix())
