@@ -189,8 +189,9 @@ func (r *networkResource) Schema(
 			},
 
 			"network_isolation_enabled": schema.BoolAttribute{
-				MarkdownDescription: "Whether client device isolation is enabled on this network, so clients " +
-					"cannot reach each other. Only valid for `corporate` networks. Omit to leave the " +
+				MarkdownDescription: "Maps to the controller's `network_isolation_enabled` network setting, which isolates " +
+					"this network from other networks. It is not the per-SSID Client Device Isolation " +
+					"(`l2_isolation` on a WLAN). Only valid for `corporate` networks. Omit to leave the " +
 					"controller's current value unchanged; a new network starts with `false`.",
 				Optional: true,
 				Computed: true,
