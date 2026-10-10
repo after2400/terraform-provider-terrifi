@@ -50,6 +50,7 @@ type networkResourceModel struct {
 	DHCPLease             types.Int64  `tfsdk:"dhcp_lease"`
 	DHCPDns               types.List   `tfsdk:"dhcp_dns"`
 	InternetAccessEnabled types.Bool   `tfsdk:"internet_access_enabled"`
+	DomainName            types.String `tfsdk:"domain_name"`
 }
 
 func (r *networkResource) Metadata(
@@ -164,6 +165,12 @@ func (r *networkResource) Schema(
 				Optional:            true,
 				Computed:            true,
 				Default:             booldefault.StaticBool(true),
+			},
+
+			"domain_name": schema.StringAttribute{
+				MarkdownDescription: "The DNS search domain suffix handed out to DHCP clients on this network (e.g. `home.example.com`). Only meaningful for `corporate` networks.",
+				Optional:            true,
+				Computed:            true,
 			},
 		},
 	}
@@ -336,6 +343,7 @@ func (r *networkResource) ModifyPlan(
 	plan.DHCPStop = types.StringNull()
 	plan.DHCPLease = types.Int64Null()
 	plan.DHCPDns = types.ListNull(types.StringType)
+	plan.DomainName = types.StringNull()
 
 	// internet_access_enabled is not meaningful for vlan-only networks. Override
 	// the schema default (true) to false — but only when the user did not
@@ -388,6 +396,9 @@ func (r *networkResource) applyPlanToState(plan, state *networkResourceModel) {
 	}
 	if !plan.InternetAccessEnabled.IsNull() && !plan.InternetAccessEnabled.IsUnknown() {
 		state.InternetAccessEnabled = plan.InternetAccessEnabled
+	}
+	if !plan.DomainName.IsNull() && !plan.DomainName.IsUnknown() {
+		state.DomainName = plan.DomainName
 	}
 }
 
@@ -479,6 +490,11 @@ func (r *networkResource) modelToAPI(ctx context.Context, m *networkResourceMode
 		if !m.InternetAccessEnabled.IsNull() {
 			net.InternetAccessEnabled = m.InternetAccessEnabled.ValueBool()
 		}
+
+		if !m.DomainName.IsNull() && !m.DomainName.IsUnknown() {
+			domainName := m.DomainName.ValueString()
+			net.DomainName = &domainName
+		}
 	}
 
 	return net
@@ -565,6 +581,12 @@ func (r *networkResource) apiToModel(ctx context.Context, net *unifi.Network, m 
 		}
 
 		m.InternetAccessEnabled = types.BoolValue(net.InternetAccessEnabled)
+
+		if net.DomainName != nil && *net.DomainName != "" {
+			m.DomainName = types.StringPointerValue(net.DomainName)
+		} else {
+			m.DomainName = types.StringNull()
+		}
 	} else {
 		// vlan-only: null out all IP/DHCP fields.
 		m.Subnet = types.StringNull()
@@ -577,6 +599,7 @@ func (r *networkResource) apiToModel(ctx context.Context, net *unifi.Network, m 
 		// Store false so it matches what ModifyPlan produces, avoiding a
 		// perpetual diff after import or refresh.
 		m.InternetAccessEnabled = types.BoolValue(false)
+		m.DomainName = types.StringNull()
 	}
 }
 
