@@ -53,6 +53,7 @@ type deviceUpdatePayload struct {
 	Disabled                   bool                        `json:"disabled"`
 	SnmpContact                string                      `json:"snmp_contact,omitempty"`
 	SnmpLocation               string                      `json:"snmp_location,omitempty"`
+	BandsteeringMode           string                      `json:"bandsteering_mode,omitempty"`
 	Volume                     *int64                      `json:"volume,omitempty"`
 	ConfigNetwork              *deviceConfigNetworkPayload `json:"config_network,omitempty"`
 	// MgmtNetworkID is the Network Override: the network the device's
@@ -174,6 +175,10 @@ func (c *Client) UpdateDevice(ctx context.Context, site string, id string, m *de
 
 	if !m.SnmpLocation.IsNull() && !m.SnmpLocation.IsUnknown() {
 		payload.SnmpLocation = m.SnmpLocation.ValueString()
+	}
+
+	if !m.BandsteeringMode.IsNull() && !m.BandsteeringMode.IsUnknown() {
+		payload.BandsteeringMode = m.BandsteeringMode.ValueString()
 	}
 
 	if !m.Volume.IsNull() && !m.Volume.IsUnknown() {

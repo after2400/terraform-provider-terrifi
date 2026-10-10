@@ -371,3 +371,22 @@ func TestDeviceMgmtNetworkID_readAndPreserveNull(t *testing.T) {
 	r.preserveNullOptionals(&declared, &live)
 	assert.Equal(t, types.StringValue("net-96"), live.MgmtNetworkID)
 }
+
+func TestDeviceBandsteeringMode(t *testing.T) {
+	set, err := json.Marshal(deviceUpdatePayload{Name: "ap", BandsteeringMode: "prefer_5g"})
+	require.NoError(t, err)
+	assert.Contains(t, string(set), `"bandsteering_mode":"prefer_5g"`)
+
+	unset, err := json.Marshal(deviceUpdatePayload{Name: "ap"})
+	require.NoError(t, err)
+	assert.NotContains(t, string(unset), "bandsteering_mode")
+
+	r := &deviceResource{}
+	var read deviceResourceModel
+	r.apiToModel(&unifi.Device{MAC: "aa:bb:cc:dd:ee:ff", BandsteeringMode: "equal"}, &read, "default")
+	assert.Equal(t, types.StringValue("equal"), read.BandsteeringMode)
+
+	// A config that doesn't declare it must not see the live value as drift.
+	r.preserveNullOptionals(&deviceResourceModel{BandsteeringMode: types.StringNull()}, &read)
+	assert.True(t, read.BandsteeringMode.IsNull())
+}
