@@ -13,6 +13,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
@@ -37,19 +38,21 @@ type networkResource struct {
 }
 
 type networkResourceModel struct {
-	ID                    types.String `tfsdk:"id"`
-	Site                  types.String `tfsdk:"site"`
-	Name                  types.String `tfsdk:"name"`
-	Purpose               types.String `tfsdk:"purpose"`
-	VLANId                types.Int64  `tfsdk:"vlan_id"`
-	Subnet                types.String `tfsdk:"subnet"`
-	NetworkGroup          types.String `tfsdk:"network_group"`
-	DHCPEnabled           types.Bool   `tfsdk:"dhcp_enabled"`
-	DHCPStart             types.String `tfsdk:"dhcp_start"`
-	DHCPStop              types.String `tfsdk:"dhcp_stop"`
-	DHCPLease             types.Int64  `tfsdk:"dhcp_lease"`
-	DHCPDns               types.List   `tfsdk:"dhcp_dns"`
-	InternetAccessEnabled types.Bool   `tfsdk:"internet_access_enabled"`
+	ID                      types.String `tfsdk:"id"`
+	Site                    types.String `tfsdk:"site"`
+	Name                    types.String `tfsdk:"name"`
+	Purpose                 types.String `tfsdk:"purpose"`
+	VLANId                  types.Int64  `tfsdk:"vlan_id"`
+	Subnet                  types.String `tfsdk:"subnet"`
+	NetworkGroup            types.String `tfsdk:"network_group"`
+	DHCPEnabled             types.Bool   `tfsdk:"dhcp_enabled"`
+	DHCPStart               types.String `tfsdk:"dhcp_start"`
+	DHCPStop                types.String `tfsdk:"dhcp_stop"`
+	DHCPLease               types.Int64  `tfsdk:"dhcp_lease"`
+	DHCPDns                 types.List   `tfsdk:"dhcp_dns"`
+	InternetAccessEnabled   types.Bool   `tfsdk:"internet_access_enabled"`
+	MdnsEnabled             types.Bool   `tfsdk:"mdns_enabled"`
+	NetworkIsolationEnabled types.Bool   `tfsdk:"network_isolation_enabled"`
 }
 
 func (r *networkResource) Metadata(
@@ -164,6 +167,29 @@ func (r *networkResource) Schema(
 				Optional:            true,
 				Computed:            true,
 				Default:             booldefault.StaticBool(true),
+			},
+
+			"mdns_enabled": schema.BoolAttribute{
+				MarkdownDescription: "Whether multicast DNS (mDNS) reflection is enabled on this network " +
+					"(Settings → Networks → Multicast DNS in the UniFi UI), needed for AirPlay-style discovery " +
+					"across networks. Only valid for `corporate` networks. Omit to leave the controller's " +
+					"current value unchanged; a new network starts with `false`.",
+				Optional: true,
+				Computed: true,
+				PlanModifiers: []planmodifier.Bool{
+					boolplanmodifier.UseStateForUnknown(),
+				},
+			},
+
+			"network_isolation_enabled": schema.BoolAttribute{
+				MarkdownDescription: "Whether client device isolation is enabled on this network, so clients " +
+					"cannot reach each other. Only valid for `corporate` networks. Omit to leave the " +
+					"controller's current value unchanged; a new network starts with `false`.",
+				Optional: true,
+				Computed: true,
+				PlanModifiers: []planmodifier.Bool{
+					boolplanmodifier.UseStateForUnknown(),
+				},
 			},
 		},
 	}
@@ -351,6 +377,21 @@ func (r *networkResource) ModifyPlan(
 		plan.InternetAccessEnabled = types.BoolValue(false)
 	}
 
+	// mdns_enabled and network_isolation_enabled exist only on corporate
+	// networks (the SDK does not send them for vlan-only). Reject an explicit
+	// value rather than silently dropping it, and pin the computed value to
+	// false so it matches what apiToModel stores.
+	if !config.MdnsEnabled.IsNull() {
+		resp.Diagnostics.AddAttributeError(path.Root("mdns_enabled"),
+			"Unsupported for vlan-only networks", "mdns_enabled can only be set when purpose is \"corporate\".")
+	}
+	if !config.NetworkIsolationEnabled.IsNull() {
+		resp.Diagnostics.AddAttributeError(path.Root("network_isolation_enabled"),
+			"Unsupported for vlan-only networks", "network_isolation_enabled can only be set when purpose is \"corporate\".")
+	}
+	plan.MdnsEnabled = types.BoolValue(false)
+	plan.NetworkIsolationEnabled = types.BoolValue(false)
+
 	resp.Diagnostics.Append(resp.Plan.Set(ctx, &plan)...)
 }
 
@@ -388,6 +429,12 @@ func (r *networkResource) applyPlanToState(plan, state *networkResourceModel) {
 	}
 	if !plan.InternetAccessEnabled.IsNull() && !plan.InternetAccessEnabled.IsUnknown() {
 		state.InternetAccessEnabled = plan.InternetAccessEnabled
+	}
+	if !plan.MdnsEnabled.IsNull() && !plan.MdnsEnabled.IsUnknown() {
+		state.MdnsEnabled = plan.MdnsEnabled
+	}
+	if !plan.NetworkIsolationEnabled.IsNull() && !plan.NetworkIsolationEnabled.IsUnknown() {
+		state.NetworkIsolationEnabled = plan.NetworkIsolationEnabled
 	}
 }
 
@@ -479,6 +526,14 @@ func (r *networkResource) modelToAPI(ctx context.Context, m *networkResourceMode
 		if !m.InternetAccessEnabled.IsNull() {
 			net.InternetAccessEnabled = m.InternetAccessEnabled.ValueBool()
 		}
+
+		if !m.MdnsEnabled.IsNull() && !m.MdnsEnabled.IsUnknown() {
+			net.MdnsEnabled = m.MdnsEnabled.ValueBool()
+		}
+
+		if !m.NetworkIsolationEnabled.IsNull() && !m.NetworkIsolationEnabled.IsUnknown() {
+			net.NetworkIsolationEnabled = m.NetworkIsolationEnabled.ValueBool()
+		}
 	}
 
 	return net
@@ -565,6 +620,8 @@ func (r *networkResource) apiToModel(ctx context.Context, net *unifi.Network, m 
 		}
 
 		m.InternetAccessEnabled = types.BoolValue(net.InternetAccessEnabled)
+		m.MdnsEnabled = types.BoolValue(net.MdnsEnabled)
+		m.NetworkIsolationEnabled = types.BoolValue(net.NetworkIsolationEnabled)
 	} else {
 		// vlan-only: null out all IP/DHCP fields.
 		m.Subnet = types.StringNull()
@@ -577,6 +634,8 @@ func (r *networkResource) apiToModel(ctx context.Context, net *unifi.Network, m 
 		// Store false so it matches what ModifyPlan produces, avoiding a
 		// perpetual diff after import or refresh.
 		m.InternetAccessEnabled = types.BoolValue(false)
+		m.MdnsEnabled = types.BoolValue(false)
+		m.NetworkIsolationEnabled = types.BoolValue(false)
 	}
 }
 

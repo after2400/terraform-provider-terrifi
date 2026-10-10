@@ -274,6 +274,77 @@ func TestNetworkApplyPlanToState(t *testing.T) {
 	})
 }
 
+func TestNetworkMdnsAndIsolation(t *testing.T) {
+	r := &networkResource{}
+	ctx := context.Background()
+
+	t.Run("modelToAPI sends both flags for corporate", func(t *testing.T) {
+		net := r.modelToAPI(ctx, &networkResourceModel{
+			Name:                    types.StringValue("Trusted"),
+			Purpose:                 types.StringValue("corporate"),
+			MdnsEnabled:             types.BoolValue(true),
+			NetworkIsolationEnabled: types.BoolValue(true),
+		})
+		assert.True(t, net.MdnsEnabled)
+		assert.True(t, net.NetworkIsolationEnabled)
+	})
+
+	t.Run("modelToAPI leaves flags false when unknown or null", func(t *testing.T) {
+		net := r.modelToAPI(ctx, &networkResourceModel{
+			Name:                    types.StringValue("Trusted"),
+			Purpose:                 types.StringValue("corporate"),
+			MdnsEnabled:             types.BoolUnknown(),
+			NetworkIsolationEnabled: types.BoolNull(),
+		})
+		assert.False(t, net.MdnsEnabled)
+		assert.False(t, net.NetworkIsolationEnabled)
+	})
+
+	t.Run("modelToAPI ignores flags for vlan-only", func(t *testing.T) {
+		net := r.modelToAPI(ctx, &networkResourceModel{
+			Name:        types.StringValue("Isolated"),
+			Purpose:     types.StringValue("vlan-only"),
+			MdnsEnabled: types.BoolValue(true),
+		})
+		assert.False(t, net.MdnsEnabled)
+	})
+
+	t.Run("apiToModel reads both flags", func(t *testing.T) {
+		name := "Trusted"
+		var model networkResourceModel
+		r.apiToModel(ctx, &unifi.Network{
+			ID: "n1", Purpose: "corporate", Name: &name,
+			MdnsEnabled: true, NetworkIsolationEnabled: false,
+		}, &model, "default")
+		assert.True(t, model.MdnsEnabled.ValueBool())
+		assert.False(t, model.NetworkIsolationEnabled.ValueBool())
+	})
+
+	t.Run("apiToModel stores false for vlan-only", func(t *testing.T) {
+		name := "Isolated"
+		var model networkResourceModel
+		r.apiToModel(ctx, &unifi.Network{
+			ID: "n2", Purpose: "vlan-only", Name: &name, MdnsEnabled: true,
+		}, &model, "default")
+		assert.False(t, model.MdnsEnabled.ValueBool())
+		assert.False(t, model.NetworkIsolationEnabled.ValueBool())
+	})
+
+	t.Run("applyPlanToState keeps live value when plan is unknown", func(t *testing.T) {
+		state := &networkResourceModel{
+			MdnsEnabled:             types.BoolValue(true),
+			NetworkIsolationEnabled: types.BoolValue(true),
+		}
+		plan := &networkResourceModel{
+			MdnsEnabled:             types.BoolUnknown(),
+			NetworkIsolationEnabled: types.BoolValue(false),
+		}
+		r.applyPlanToState(plan, state)
+		assert.True(t, state.MdnsEnabled.ValueBool(), "unknown plan value must not clear the live setting")
+		assert.False(t, state.NetworkIsolationEnabled.ValueBool(), "explicit false is applied")
+	})
+}
+
 // ---------------------------------------------------------------------------
 // Acceptance tests
 // ---------------------------------------------------------------------------
@@ -555,6 +626,45 @@ resource "terrifi_network" "test" {
 					}
 					return fmt.Sprintf("%s:%s", rs.Primary.Attributes["site"], rs.Primary.Attributes["id"]), nil
 				},
+			},
+		},
+	})
+}
+
+func TestAccNetwork_mdnsAndIsolation(t *testing.T) {
+	name := fmt.Sprintf("tfacc-mdns-%s", randomSuffix())
+	cfg := func(mdns, iso bool) string {
+		return fmt.Sprintf(`
+resource "terrifi_network" "test" {
+  name                      = %q
+  purpose                   = "corporate"
+  vlan_id                   = 51
+  subnet                    = "192.168.51.1/24"
+  dhcp_enabled              = true
+  dhcp_start                = "192.168.51.6"
+  dhcp_stop                 = "192.168.51.254"
+  mdns_enabled              = %t
+  network_isolation_enabled = %t
+}
+`, name, mdns, iso)
+	}
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { preCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: cfg(true, false),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("terrifi_network.test", "mdns_enabled", "true"),
+					resource.TestCheckResourceAttr("terrifi_network.test", "network_isolation_enabled", "false"),
+				),
+			},
+			{
+				Config: cfg(false, true),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("terrifi_network.test", "mdns_enabled", "false"),
+					resource.TestCheckResourceAttr("terrifi_network.test", "network_isolation_enabled", "true"),
+				),
 			},
 		},
 	})
